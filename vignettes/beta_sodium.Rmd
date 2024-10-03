@@ -1,0 +1,254 @@
+---
+title: "Beta diversity sodium"
+author: "Joonatan Palmu"
+date: "`r format(Sys.time(), '%d.%m.%Y')`"
+output:
+  rmdformats::robobook:
+    self_contained: true
+    thumbnails: false
+    lightbox: true
+    gallery: true
+---
+
+# Setup
+
+```{css, echo = FALSE}
+.page-inner, #content{
+  max-width:1920px !important;
+}
+``` 
+
+```{r libraries}
+library(magrittr)
+```
+
+```{r load functions}
+devtools::load_all()
+```
+
+## Command line arguments
+
+```{r}
+args <- list(
+  optparse::make_option(c("-e", "--east"), action="store_true", default=FALSE, help="Exclude Eastern Finland subpopulation [default \"%default\"]"),
+  optparse::make_option(c("-w", "--west"), action="store_true", default=FALSE, help="Exclude Eastern Finland subpopulation [default \"%default\"]")) %>% 
+  optparse::OptionParser(option_list = .) %>%
+  optparse::parse_args()
+```
+
+```{r}
+args %>% tibble::enframe(name = "Option", value = "Argument") %>% DT::datatable()
+```
+
+## Formatting options
+
+```{r options, echo = FALSE}
+knitr::opts_chunk$set(include = TRUE, echo = TRUE, message = FALSE, results='asis', cache=FALSE, warning=FALSE, error = TRUE)
+```
+
+    
+```{r define ggplot settings}
+myggsave <- myggsavefactory()
+ggplot2::theme_set(ggthemes::theme_tufte(base_family = "sans", base_size = 12) +
+                   ggplot2::theme(
+                              panel.border = ggplot2::element_rect(colour = "black", fill = NA),
+                              axis.text = ggplot2::element_text(colour = "black", size = 10),
+                              aspect.ratio = 1))
+```
+    
+# Data definitions
+
+```{r}
+vars <- list(BL_AGE = "Age",
+          MEN = "Men",
+          BMI = "BMI",
+          CURR_SMOKE = "Smoking",
+          ALKI2_FR02 = "Alcohol",
+          Q57X = "Physical activity",
+          PREVAL_DIAB.col_from_endpoints = "Diabetes",
+          dUNA = "24‐Hour Sodium Excretion",
+          KREA_ENTS = "Creatinine",
+          HFC = "Healthy Food Choices",
+          EAST = "Eastern Finland") 
+```
+
+```{r}
+( tse <- readRDS("data/tse_gg2_MGS_FR02.rds") %>%
+    mia::transformAssay(assay.type = "counts", method = "relabundance") %>% 
+    tse_filter(GRAVID %in% c(1, NA),
+               BL_USE_RX_J01_1mo %in% c(0, NA)) %>% 
+    tse_mutate(dplyr::across(c(MEN, CURR_SMOKE, Q57X, PREVAL_DIAB.col_from_endpoints), as.factor)) %>% 
+    tse_mutate(dUNA = NA.* U_VIRTSA_YHT/1000) %>%
+    tse_add_food_score(col = HFC) %>% 
+    { if (args$east) tse_filter(., EAST == 0) else . } %>% 
+    { if (args$west) tse_filter(., EAST == 1) else . } %>% 
+    tse_select(names(vars)) %>% 
+    tse_filter(dplyr::if_all(dplyr::one_of(names(vars)), not_na)) %>%
+    mia::estimateDiversity(assay.type = "counts", index = "shannon", name = "shannon") ) 
+```
+
+# Characteristics
+
+```{r}
+tse %>%
+  tse_meta(rownames = FALSE) %>% 
+  mytableone(vars)
+```
+
+
+# Beta diveristy
+
+```{r}
+tses <- tibble::tibble(AREA = c("East", "West"), index = c(0, 1)) %>% 
+  dplyr::mutate(tse = purrr::map(index, ~tse %>%
+                                   tse_filter(EAST == .x) %>% 
+                                   mia::mergeFeaturesByRank(rank = "Species")))
+```
+
+```{r}
+beta_adonis <- function(x) {
+  set.seed(20240331)
+  vegan::adonis2(t(SummarizedExperiment::assay(x, "relabundance")) ~ BL_AGE + MEN + CURR_SMOKE + ALKI2_FR02 + Q57X + PREVAL_DIAB.col_from_endpoints + KREA_ENTS + dUNA,
+                 by = "margin",
+                 data = SummarizedExperiment::colData(x),
+                 method = "euclidean",
+                 permutations = 9999)
+}
+```
+
+```{r}
+beta_rda <- function(x) {
+  set.seed(20240331)
+  dbrda <- vegan::dbrda(t(SummarizedExperiment::assay(x, "relabundance")) ~ BL_AGE + MEN + CURR_SMOKE + ALKI2_FR02 + Q57X + PREVAL_DIAB.col_from_endpoints + KREA_ENTS + dUNA, 
+               data = SummarizedExperiment::colData(x))
+}
+```
+
+```{r}
+beta_perm <- function(x) {
+  vegan::anova.cca(x,
+                   by = "margin",
+                   method = "euclidean",
+                   permutations = 9999)
+}
+```
+
+```{r}
+df_beta <- tses %>%
+  dplyr::mutate(adonis = purrr::map(tse, beta_adonis)) %>%
+  dplyr::mutate(dbrda = purrr::map(tse, beta_rda)) %>%
+  dplyr::mutate(perm = purrr::map(dbrda, beta_perm))
+```
+
+## Adonis
+
+```{r}
+df_beta %>%
+  dplyr::mutate(tidy = purrr::map(adonis, broom::tidy)) %>%
+  dplyr::select(-tse, -adonis, -dbrda, -perm) %>% 
+  tidyr::unnest(tidy) %>%
+  knitr::kable()
+```
+
+## dbRDA and ANOVA
+
+```{r}
+df_beta %>%
+  dplyr::mutate(tidy = purrr::map(perm, broom::tidy)) %>%
+  dplyr::select(-tse, -adonis, -dbrda, -perm) %>% 
+  tidyr::unnest(tidy) %>%
+  knitr::kable()
+```
+
+# Feature importance in RDA
+
+```{r}
+beta_importance <- function(x, y) {
+  vegan::sppscores(y) <- t(SummarizedExperiment::assay(x, "relabundance"))
+  y$CCA$v %>%
+    tibble::as_tibble(rownames = "taxa") %>%
+    tidyr::gather(axis, value, -taxa) %>%
+    dplyr::mutate(value = abs(value)) %>% 
+    dplyr::arrange(desc(value)) %>%
+    dplyr::filter(dplyr::row_number() == 1, .by = taxa) %>%
+    head(20)
+}
+```
+
+```{r}
+df_plot <- df_beta %>%
+  dplyr::mutate(plot = purrr::map2(tse, dbrda, beta_importance)) %>%
+  tidyr::unnest(plot) 
+```
+
+```{r}
+df_taxa_index <- df_plot %>%
+  dplyr::summarize(value = sum(value), .by = taxa) %>%
+  dplyr::arrange(desc(value)) %>%
+  dplyr::mutate(taxa_index = dplyr::row_number()) %>%
+  dplyr::select(taxa, taxa_index)
+```
+
+```{r}
+{ df_plot %>%
+  dplyr::mutate(taxa = forcats::fct_relevel(taxa, df_taxa_index %>% dplyr::pull(taxa) %>% rev)) %>%
+  dplyr::select(taxa, value, AREA) %>% 
+  ggplot2::ggplot(ggplot2::aes(x = taxa, y = value, group = AREA, fill = AREA)) +
+  ggplot2::geom_bar(stat = "identity",
+                    position = ggplot2::position_dodge(preserve = 'single')) +
+  ggplot2::labs(x = "", y= "", title = "Top Taxa") +
+  ggplot2::coord_flip() } %>% 
+  myggsave("salt_features", width = 10, height = 10)
+```
+
+# Scatter plots
+
+## PCoA
+
+```{r}
+beta_pcoa <- function(tse) {
+  mia::mergeFeaturesByRank(tse, rank = "Species") %>% 
+    mia::transformAssay(method = "relabundance") %>%
+    scater::runMDS(FUN = vegan::vegdist,
+                   name = "PCoA_BC",
+                   assay.type = "relabundance")
+}
+```
+
+
+```{r}
+ret_rda <- beta_pcoa(tse)
+```
+
+```{r}
+{ miaViz::plotRDA(ret_rda,
+                "PCoA_BC",
+                add.vectors = FALSE,
+                add.ellipse = FALSE,
+                colour_by = "dUNA") +
+    ggplot2::scale_color_gradient(low="white", high="black") } %>% 
+  myggsave("salt_pcoa", width = 10, height = 10)
+```
+
+## RDA
+
+```{r}
+beta_rda_plot <- function(tse) {
+  mia::mergeFeaturesByRank(tse, rank = "Species") %>% 
+    mia::transformAssay(method = "relabundance") %>%
+    mia::runRDA(assay.type = "relabundance",
+                formula = assay ~ BL_AGE + MEN + CURR_SMOKE + ALKI2_FR02 + Q57X + PREVAL_DIAB.col_from_endpoints + KREA_ENTS + dUNA,
+                distance = "bray",
+                na.action = na.exclude)
+}
+```
+
+```{r}
+{ miaViz::plotRDA(beta_rda_plot(tse),
+                "RDA",
+                add.vectors = FALSE,
+                add.ellipse = "colour",
+                colour_by = "dUNA") +
+    ggplot2::scale_color_gradient(low="white", high="black") } %>% 
+  myggsave("salt_rda", width = 10, height = 10)
+```

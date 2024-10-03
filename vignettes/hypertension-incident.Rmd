@@ -1,0 +1,373 @@
+---
+title: "Hypertension metagenomics in FINRISK 2002"
+author: "Joonatan Palmu"
+date: "`r format(Sys.time(), '%d.%m.%Y')`"
+output:
+    rmdformats::html_clean:
+        self_contained: true
+        thumbnails: false
+        lightbox: true
+        gallery: true
+---
+
+# Setup
+
+```{r libraries}
+library(magrittr)
+```
+
+```{r load functions}
+devtools::load_all()
+```
+
+## Command line arguments
+
+```{r}
+args <- list(
+  optparse::make_option("--east", action="store_true", default=FALSE, help="Exclude Eastern Finland subpopulation [default \"%default\"]"),
+  optparse::make_option("--west", action="store_true", default=FALSE, help="Exclude Eastern Finland subpopulation [default \"%default\"]"),
+  optparse::make_option("--detection", type = "numeric", default = 0.1/100, help = "Detection limit [default %default]"),
+optparse::make_option("--prevalence", type = "numeric", default = 1/100, help = "Prevalence limit [default %default]")) %>% 
+  optparse::OptionParser(option_list = .) %>%
+  optparse::parse_args()
+```
+
+```{r}
+args %>% tibble::enframe(name = "Option", value = "Argument") %>% DT::datatable()
+```
+
+## Formatting options
+
+```{r options, echo = FALSE}
+knitr::opts_chunk$set(include = TRUE, echo = TRUE, message = FALSE, results='asis', cache=FALSE, warning=FALSE, error = TRUE)
+```
+
+    
+```{r define ggplot settings}
+myggsave <- myggsavefactory()
+```
+
+```{r}
+{ ggthemes::theme_tufte(base_family = "sans", base_size = 12) +
+    ggplot2::theme(panel.border = ggplot2::element_rect(colour = "black", fill = NA),
+                   axis.text = ggplot2::element_text(colour = "black", size = 10),
+                   aspect.ratio = 1) } %>%
+  ggplot2::theme_set()
+```
+    
+# Data definitions
+
+```{r}
+vars <- list(BL_AGE = "Age",
+          MEN = "Men",
+          BMI = "BMI",
+          CURR_SMOKE = "Smoking",
+          ALKI2_FR02 = "Alcohol",
+          Q57X = "Physical activity",
+          PREVAL_DIAB = "Diabetes",
+          dUNA = "24‐Hour Sodium Excretion",
+          KREA_ENTS = "Creatinine",
+          HFC = "Healthy Food Choices",
+          EAST = "Eastern Finland")  
+```
+
+```{r}
+tse <- readRDS("data/tse_gg2_MGS_FR02.rds") %>%
+  mia::transformAssay(assay.type = "counts", method = "relabundance") %>% 
+  mia::estimateDiversity(assay.type = "counts", index = "shannon", name = "shannon") %>%
+  tse_add_food_score(HFC) %>%
+  tse_mutate(PREVAL_HTN = ifelse(PREVAL_HIBP.col_from_endpoints + PREVAL_RX_RR_SPECIFIC > 0, 1, 0)) %>%
+  tse_mutate(INCIDENT_HTN = ifelse(INCIDENT_HIBP.col_from_endpoints + INCIDENT_RX_RR_SPECIFIC > 0, 1, 0)) %>%
+  tse_mutate(HTN_AGEDIFF = pmin(HIBP_AGEDIFF.col_from_endpoints, RX_RR_SPECIFIC_AGEDIFF)) %>% 
+  tse_mutate(dplyr::across(c(MEN,
+                             EAST,
+                             BP_TREAT,
+                             CURR_SMOKE,
+                             dplyr::contains("INCIDENT"),
+                             dplyr::contains("PREVAL")), as.factor)) %>%
+  tse_filter(GRAVID %in% c(1, NA), BL_USE_RX_J01_1mo %in% c(0, NA)) %>% 
+  tse_filter(SYSTM < 140, DIASM < 90, PREVAL_HTN == 0, HYPERT_AHA == 0) %>%
+  { if (args$east) tse_filter(., EAST == 0) else . } %>% 
+  { if (args$west) tse_filter(., EAST == 1) else . } %>% 
+  tse_filter(dplyr::if_all(dplyr::one_of(names(vars)), not_na)) %>%
+  tse_select(PREVAL_HTN, INCIDENT_HTN, HTN_AGEDIFF, names(vars))
+```
+
+# Characteristics
+
+```{r}
+tse %>%
+  tse_meta(rownames = FALSE) %>%
+  mytableone(vars)
+```
+
+# Alpha diversity
+
+## Univariate
+
+```{r}
+tse %>%
+  tse_meta(rownames = FALSE) %>% 
+  survival::coxph(my_surv(HTN_AGEDIFF, INCIDENT_HTN) ~ scale(shannon),
+                  data = .) %>% 
+  broom::tidy() %>%
+  round_numeric_columns() %>% 
+  DT::datatable(caption = "Alpha diversity")
+```
+
+## Multivariate
+
+```{r}
+tse %>%
+  tse_meta(rownames = FALSE) %>% 
+  survival::coxph(my_surv(HTN_AGEDIFF, INCIDENT_HTN) ~
+                    scale(shannon) + BL_AGE + MEN + BMI + PREVAL_DIAB.col_from_pheno + HFC +
+                    PREVAL_HFAIL_STRICT.col_from_pheno + CURR_SMOKE, data = .) %>% 
+  broom::tidy() %>%
+  round_numeric_columns() %>% 
+  DT::datatable(caption = "Alpha diversity")
+```
+
+# Beta diversity
+
+```{r}
+calculate_beta_diversity <- function(tse) {
+  mia::mergeFeaturesByRank(tse, rank = "Species") %>% 
+    mia::transformAssay(method = "relabundance") %>%
+    mia::runRDA(assay.type = "relabundance",
+                formula = assay ~ BL_AGE + MEN + BMI + PREVAL_DIAB.col_from_pheno + HFC +
+                  PREVAL_HFAIL_STRICT.col_from_pheno + CURR_SMOKE + INCIDENT_HTN,
+                distance = "bray",
+                na.action = na.exclude)
+}
+```
+
+
+```{r}
+tse_species <- compute_or_load_result(function(x) calculate_beta_diversity(tse), "cache/beta-diversity-htn.rds")
+```
+
+```{r}
+rda_info <- attr(SingleCellExperiment::reducedDim(tse_species, "RDA"), "significance")
+```
+
+ANOVA model
+
+```{r}
+rda_info$permanova %>% 
+  knitr::kable()
+```
+
+ANOVA assumptions
+
+```{r}
+rda_info$homogeneity %>% 
+  knitr::kable()
+```
+
+```{r}
+{ miaViz::plotRDA(tse_species,
+                "RDA",
+                add.vectors = FALSE,
+                add.ellipse = "colour",
+                colour_by = "INCIDENT_HTN") +
+    ggplot2::scale_colour_manual(name = "Incident hypertension",
+                                 labels = c("0" = "Normotensive",
+                                            "1" = "Hypertensive"),
+                                 values = c("0" = "gray",
+                                            "1" = "black")) } %>% 
+  myggsave("hypertension_rda", width = 10, height = 10)
+```
+
+
+# Approximate microbial data dimensions
+
+```{r}
+df_counts <- tse %>%
+  mia::subsetByPrevalentFeatures(detection = args$detection, prevalence = args$prevalence, as_relative = TRUE) %>% 
+  SummarizedExperiment::assay("counts") %>%
+  t %>%
+  tibble::as_tibble()
+```
+
+```{r}
+pca <- prcomp(df_counts)
+```
+
+```{r}
+n_independent_axes <- broom::tidy(pca, matrix = "eigenvalues") %>%
+  dplyr::filter(cumulative < 0.9) %>%
+  nrow %>%
+  add(1)
+```
+
+```{r, fig.cap="PCA for bacterial counts", out.width="50%", echo = FALSE}
+{ broom::tidy(pca, matrix = "eigenvalues") %>%
+    ggplot2::ggplot(ggplot2::aes(x = PC))+
+    ggplot2::geom_bar(ggplot2::aes(y = cumulative),
+             stat = "identity",
+             fill = "steelblue",
+             colour = "steelblue",
+             width = 1) +
+    ggplot2::geom_bar(ggplot2::aes(y = percent),
+             stat = "identity",
+             fill = "red",
+             colour = "red",
+             width = 1) +
+    ggplot2::geom_hline(yintercept = 0.90, linetype = 2) +
+    ggplot2::geom_vline(xintercept = n_independent_axes, linetype = 2) +
+    ggplot2::scale_y_continuous(name = "Proportion of variance",
+                       labels = scales::percent_format(accuracy = 1),
+                       breaks = seq(0, 1, 0.5) %union% c(0.9),
+                       expand = c(0, 0)) +
+    ggplot2::scale_x_continuous(name = "PC axes",
+                       breaks = seq(0, 1000, 50) %union% c(n_independent_axes),
+                       expand = c(0, 0)) +
+    ggplot2::theme(axis.text.x = ggplot2::element_text(angle = 90, vjust = 0.5, hjust = 1))
+  } %>%
+  myggsave(name = "gut_pca_variance", width = 5, height = 5)
+```
+
+# Common taxa
+
+## Agglomerate prevalent features
+
+```{r}
+subset_features_partial <-  purrr::partial(mia::subsetByPrevalentFeatures,
+                                           x = tse,
+                                           detection = args$detection,
+                                           prevalence = args$prevalence,
+                                           as_relative = TRUE) %>%
+  purrr::possibly()
+```
+
+```{r}
+taxa_subsets <- c("Phylum", "Class", "Order", "Family",  "Genus", "Species") %>%
+  rlang::set_names() %>%
+  purrr::map(subset_features_partial)
+```
+
+## Melt TSE to data frame
+
+```{r}
+melt_tse <- function(x, method = "clr") {
+  mia::transformAssay(x, method = method, pseudocount = 1) %>% 
+    mia::meltAssay(add_row_data = TRUE, assay_name = method) %>%
+    dplyr::mutate(FeatureID = glue::glue("GUT_{FeatureID}")) %>%
+    dplyr::mutate(FeatureID = stringr::str_replace_all(FeatureID, c(" " = "_", "-" = "_"))) %>% 
+    dplyr::select(SampleID, FeatureID, clr) %>%
+    tidyr::spread(FeatureID, clr) %>% 
+    dplyr::full_join(tse_meta(x), by = dplyr::join_by(SampleID == rownames))
+}
+```
+
+```{r}
+dfs <- taxa_subsets %>%
+  purrr::map(melt_tse, .progress = TRUE)
+```
+
+# Cox's models
+
+## Check available taxa
+
+```{r}
+taxa_rank_list <- function(x, y) {
+  list_names <- colnames(x) %>%
+    stringr::str_subset("GUT_") %>%
+    rlang::set_names()
+}
+```
+
+```{r}
+taxa_rank_list <- dfs %>%
+  purrr::imap(taxa_rank_list, .progress = TRUE)
+```
+
+## Perform Cox's models
+
+```{r}
+coxph_partial <- purrr::partial(survival::coxph,
+                                formula = my_surv(HTN_AGEDIFF, INCIDENT_HTN) ~
+                                  taxon + BL_AGE +
+                                  MEN + BMI + PREVAL_DIAB.col_from_pheno +
+                                  HFC + PREVAL_HFAIL_STRICT.col_from_pheno +
+                                  CURR_SMOKE,
+                                ties = "breslow")
+```
+
+```{r}
+cox_model_for_taxon <- function(rank, taxon) {
+  dfs[[rank]] %>%
+    dplyr::rename(taxon := {{taxon}}) %>% 
+    coxph_partial(data = .)
+}
+```
+
+
+```{r}
+df_cox_results <- taxa_rank_list %>%
+  purrr::map_df(~tibble::tibble(taxa = .x), .id = "rank") %>% 
+  tidyr::gather(rank, taxa) %>%
+  dplyr::mutate(results = purrr::map2(rank, taxa, cox_model_for_taxon, .progress = TRUE)) %>%
+  dplyr::mutate(tidy = purrr::map(results, broom::tidy)) 
+```
+
+```{r}
+df_cox_results %>%
+  dplyr::select(-results) %>% 
+  tidyr::unnest(tidy) %>%
+  dplyr::filter(stringr::str_detect(term, "taxon")) %>%
+  dplyr::mutate(qval = my_adjust_p(p.value, n = n_independent_axes)) %>%
+  dplyr::arrange(qval) %>% 
+  DT::datatable()
+```
+
+## Check PH assumptions
+
+```{r}
+zph_validation <- function(x){
+  survival::cox.zph(x)$table %>% tibble::as_tibble(rownames = "term")
+}
+```
+
+
+```{r}
+df_cox_results %>%
+  dplyr::mutate(results = purrr::map(results, zph_validation, .progress = TRUE)) %>% 
+  tidyr::unnest(results) %>%
+  dplyr::arrange(p) %>%
+  DT::datatable()
+```
+
+## Kaplan-Meier
+
+```{r}
+kaplan_meier_plot <- function(rank, taxon, n = 4) {
+  dfs[[rank]] %>%
+    dplyr::rename(taxon := {{taxon}}) %>%
+    dplyr::mutate(taxon_tile = dplyr::ntile(taxon, n)) %>% 
+    ggsurvfit::survfit2(my_surv(HTN_AGEDIFF, INCIDENT_HTN) ~ taxon_tile,
+                        data = .) %>%
+    ggsurvfit::ggsurvfit(linewidth = 1) +
+    #ggsurvfit::add_confidence_interval() +
+    ggsurvfit::add_risktable(risktable_stats = "{cum.event}") +
+    ggsurvfit::add_risktable_strata_symbol(symbol = "\U25CF", size = 10) +
+    ggplot2::labs(title = taxon) +
+    ggplot2::scale_color_grey(start = 0.9, end = 0)
+}
+```
+
+
+```{r}
+df_cox_results %>%
+  tidyr::unnest(tidy) %>%
+  dplyr::filter(stringr::str_detect(term, "taxon")) %>%
+  dplyr::filter(p.value < 0.05) %>%
+  dplyr::arrange(p.value) %>% 
+  dplyr::mutate(plot = purrr::map2(rank, taxa, kaplan_meier_plot)) %>%
+  dplyr::pull(plot) %>% 
+  gridExtra::arrangeGrob(grobs = ., ncol = 3) %>%
+  myggsave("km_hypertension", width = 15, height = 30)
+```
+
+

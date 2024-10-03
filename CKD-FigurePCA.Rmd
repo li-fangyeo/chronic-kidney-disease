@@ -1,0 +1,110 @@
+---
+title: 'CKD prevalence Figures'
+author: "Li-Fang Yeo"
+date: "2024-06-20"
+output: html_document
+---
+```{r setup, include=FALSE} 
+knitr::opts_chunk$set(warning = FALSE) 
+```
+```{r}
+library(magrittr)
+```
+```{r}
+devtools::load_all()
+```
+Command line arguments
+```{r}
+args <- list(
+  optparse::make_option("--east", action="store_true", default=FALSE, help="Exclude Eastern Finland subpopulation [default \"%default\"]"),
+  optparse::make_option("--west", action="store_true", default=FALSE, help="Exclude Eastern Finland subpopulation [default \"%default\"]"),
+  optparse::make_option("--low", action="store_true", default=FALSE, help="Exclude low GFR [default \"%default\"]"),
+  optparse::make_option("--high", action="store_true", default=FALSE, help="Exclude high GFR [default \"%default\"]"),
+  optparse::make_option("--detection", type = "numeric", default = 0.1/100, help = "Detection limit [default %default]"),
+optparse::make_option("--prevalence", type = "numeric", default = 1/100, help = "Prevalence limit [default %default]")) %>% 
+  optparse::OptionParser(option_list = .) %>%
+  optparse::parse_args()
+```
+```{r}
+args %>% tibble::enframe(name = "Option", value = "Argument") %>% DT::datatable()
+```
+Data definition
+```{r}
+vars <- list(BL_AGE = "Age",
+             MEN = "Men",
+             BMI = "BMI",
+             PREVAL_DIAB.col_from_endpoints = "Diabetes",
+             SYSTM = "Systolic blood pressure",
+             BP_TREAT = "Antihypertensive medication",
+             PREVAL_HFAIL_STRICT.col_from_endpoints = "Heart failure",
+             PREVAL_CKD = "Prevalent CKD",
+             INCIDENT_CKD = "Incident CKD",
+             CKD_AGEDIFF = "CKD Agediff",
+             CURR_SMOKE = "Smoking",
+             PREVAL_AUTOIMMUN.col_from_endpoints  = "Autoimmune disease",
+             KREA_ENTS = "Creatinine",
+             GFR = "Glomerulal filtration rate",
+             UAC = "Urine Albumin-Creatinine Ratio",
+             EAST = "Eastern Finland",
+             shannon = "Shannon diversity")
+```
+Read data in, calculate GFR, UAC and remove NAs
+```{r}
+tse <- readRDS("data/tse_gg2_MGS_FR02.rds") %>%
+  mia::transformAssay(assay.type = "counts", method = "relabundance") %>% 
+  mia::estimateDiversity(assay.type = "counts", index = "shannon", name = "shannon") %>%
+  tse_mutate(dplyr::across(c(MEN,
+                             EAST,
+                             BP_TREAT,
+                             CURR_SMOKE,
+                             dplyr::contains("INCIDENT"),
+                             dplyr::contains("PREVAL")), as.factor)) %>% 
+  tse_mutate(GFR = 0.993^round(BL_AGE) *
+               dplyr::case_when(MEN == 0 & KREA_ENTS <= 62 ~ 144*(KREA_ENTS/61.9)^-0.329,
+                                MEN == 0 & KREA_ENTS >  62 ~ 144*(KREA_ENTS/61.9)^-1.209,
+                                MEN == 1 & KREA_ENTS <= 80 ~ 141*(KREA_ENTS/79.6)^-0.411,
+                                MEN == 1 & KREA_ENTS >  80 ~ 141*(KREA_ENTS/79.6)^-1.209)) %>%
+  tse_mutate(UAC = U_ALB/U_KREA) %>% 
+  tse_filter(GRAVID %in% c(1, NA), BL_USE_RX_J01_1mo %in% c(0, NA)) %>% 
+  tse_filter(GFR >= 60, PREVAL_CKD == 0, UAC <=3 | is.na(UAC)) %>%
+  { if (args$east) tse_filter(., EAST == 0) else . } %>% 
+  { if (args$west) tse_filter(., EAST == 1) else . } %>% 
+  tse_filter(dplyr::if_all(dplyr::one_of(names(vars) %difference% "UAC"), not_na)) %>%
+  tse_select(names(vars))
+```
+Approximate microbial dimensions
+```{r}
+#Microbial reads were filtered to be detected at least 0.1% relative abundance level, and prevalent in 1% in all samples
+df_counts <- tse %>%
+  mia::subsetByPrevalentFeatures(detection = args$detection, prevalence = args$prevalence, as_relative = TRUE) %>% 
+  SummarizedExperiment::assay("counts") %>%
+  t %>%
+  tibble::as_tibble()
+```
+```{r}
+pca <- prcomp(df_counts)
+```
+```{r}
+library(ggfortify)
+```
+```{r}
+#convert tse to a dataframe
+pc_df <- as.data.frame(colData(tse))
+
+pca.plot <- autoplot(pca, 
+                  data = pc_df, 
+                  colour = 'GFR') 
+
+pca.plot + labs(title = "Bray-Curtis PCA") +
+      theme(title = element_text(size = 15))
+  #scale_color_gradient(low = "white", high = "steelblue")
+  #xlim(0,2)
+```
+```{r}
+pca.plot2 <- autoplot(pca, 
+                     data = pc_df, 
+                     colour = 'INCIDENT_CKD') 
+pca.plot2 + labs(title = "Bray-Curtis PCA") +
+  theme(title = element_text(size = 15))
+```
+

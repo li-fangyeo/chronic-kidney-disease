@@ -1,0 +1,223 @@
+---
+title: "Impact of Dietary Salt Intake on Gut Microbiota Composition in FINRISK 2002"
+author: "Joonatan Palmu"
+date: "`r format(Sys.time(), '%d.%m.%Y')`"
+output:
+  rmdformats::robobook:
+    self_contained: true
+    thumbnails: false
+    lightbox: true
+    gallery: true
+---
+
+# Setup
+
+```{css, echo = FALSE}
+.page-inner, #content{
+  max-width:1920px !important;
+}
+``` 
+
+```{r libraries}
+library(magrittr)
+```
+
+```{r load functions}
+devtools::load_all()
+```
+
+## Command line arguments
+
+```{r}
+args <- list(
+  optparse::make_option(c("-e", "--east"), action="store_true", default=FALSE, help="Exclude Eastern Finland subpopulation [default \"%default\"]"),
+  optparse::make_option(c("-w", "--west"), action="store_true", default=FALSE, help="Exclude Eastern Finland subpopulation [default \"%default\"]")) %>% 
+  optparse::OptionParser(option_list = .) %>%
+  optparse::parse_args()
+```
+
+```{r}
+args %>% tibble::enframe(name = "Option", value = "Argument") %>% DT::datatable()
+```
+
+## Formatting options
+
+```{r options, echo = FALSE}
+knitr::opts_chunk$set(include = TRUE, echo = TRUE, message = FALSE, results='asis', cache=FALSE, warning=FALSE, error = TRUE)
+```
+
+    
+```{r define ggplot settings}
+myggsave <- myggsavefactory()
+ggplot2::theme_set(ggthemes::theme_tufte(base_family = "sans", base_size = 12) +
+                   ggplot2::theme(
+                              panel.border = ggplot2::element_rect(colour = "black", fill = NA),
+                              axis.text = ggplot2::element_text(colour = "black", size = 10),
+                              aspect.ratio = 1))
+```
+    
+# Data definitions
+
+```{r}
+vars <- list(BL_AGE = "Age",
+             MEN = "Men",
+             BMI = "BMI",
+             PREVAL_DIAB.col_from_pheno = "Diabetes",
+             SYSTM = "Systolic blood pressure",
+             DIASM = "Diastolic blood pressure",
+             HFC = "Healthy Food Choices",
+             BP_TREAT = "Antihypertensive medication",
+             PREVAL_HFAIL_STRICT.col_from_pheno = "Heart failure",
+             PREVAL_HIBP.col_from_endpoints = "Prevalent hypertension code",
+             INCIDENT_HIBP.col_from_endpoints = "Incident hypertension code",
+             HIBP_AGEDIFF.col_from_endpoints = "Hypertension code time",
+             PREVAL_RX_RR_SPECIFIC = "Prevalent antihypertensive",
+             INCIDENT_RX_RR_SPECIFIC = "Incident antihypertensive",
+             RX_RR_SPECIFIC_AGEDIFF = "Antihypertensive agediff",
+             PREVAL_HTN = "Prevalent hypertension",
+             INCIDENT_HTN = "Incident hypertension",
+             HTN_AGEDIFF = "Hypertension time",
+             CURR_SMOKE = "Smoking",
+             EAST = "Eastern Finland",
+             shannon = "Shannon diversity") 
+```
+
+```{r}
+tse <- readRDS("data/tse_gg2_MGS_FR02.rds") %>%
+  mia::transformAssay(assay.type = "counts", method = "relabundance") %>% 
+  mia::estimateDiversity(assay.type = "counts", index = "shannon", name = "shannon") %>%
+  tse_add_food_score(HFC) %>%
+  tse_mutate(PREVAL_HTN = ifelse(PREVAL_HIBP.col_from_endpoints + PREVAL_RX_RR_SPECIFIC > 0, 1, 0)) %>%
+  tse_mutate(INCIDENT_HTN = ifelse(INCIDENT_HIBP.col_from_endpoints + INCIDENT_RX_RR_SPECIFIC > 0, 1, 0)) %>%
+  tse_mutate(HTN_AGEDIFF = pmin(HIBP_AGEDIFF.col_from_endpoints, RX_RR_SPECIFIC_AGEDIFF)) %>% 
+  tse_mutate(dplyr::across(c(MEN,
+                             EAST,
+                             BP_TREAT,
+                             CURR_SMOKE,
+                             dplyr::contains("INCIDENT"),
+                             dplyr::contains("PREVAL")), as.factor)) %>%
+  tse_filter(GRAVID %in% c(1, NA), BL_USE_RX_J01_1mo %in% c(0, NA)) %>% 
+  tse_filter(SYSTM < 140, DIASM < 90, PREVAL_HTN == 0, HYPERT_AHA == 0) %>%
+  { if (args$east) tse_filter(., EAST == 0) else . } %>% 
+  { if (args$west) tse_filter(., EAST == 1) else . } %>% 
+  tse_filter(dplyr::if_all(dplyr::one_of(names(vars)), not_na)) %>%
+  tse_select(PREVAL_HTN, INCIDENT_HTN, HTN_AGEDIFF, names(vars))
+```
+
+# Characteristics
+
+```{r}
+tse %>%
+  tse_meta(rownames = FALSE) %>% 
+  mytableone(vars)
+```
+
+## Species
+
+```{r}
+tse_species <- mia::subsetByPrevalentFeatures(tse, rank = "Species",
+                                              detection = 0.1/100,
+                                              prevalence = 1/100,
+                                              as_relative = TRUE)
+```
+
+# Principal component analysis
+
+```{r}
+df_counts <- SummarizedExperiment::assay(tse_species, "counts") %>% t %>% tibble::as_tibble()
+```
+
+```{r}
+pca <- prcomp(df_counts)
+```
+
+```{r}
+n_independent_axes <- broom::tidy(pca, matrix = "eigenvalues") %>%
+  dplyr::filter(cumulative < 0.95) %>%
+  nrow %>%
+  add(1)
+```
+
+
+```{r, fig.cap="PCA for bacterial counts", out.width="50%"}
+{ broom::tidy(pca, matrix = "eigenvalues") %>%
+    ggplot2::ggplot(ggplot2::aes(x = PC))+
+    ggplot2::geom_bar(ggplot2::aes(y = cumulative),
+             stat = "identity",
+             fill = "steelblue",
+             colour = "steelblue",
+             width = 1) +
+    ggplot2::geom_bar(ggplot2::aes(y = percent),
+             stat = "identity",
+             fill = "red",
+             colour = "red",
+             width = 1) +
+    ggplot2::geom_hline(yintercept = 0.95, linetype = 2) +
+    ggplot2::geom_vline(xintercept = n_independent_axes, linetype = 2) +
+    ggplot2::scale_y_continuous(name = "Proportion of variance",
+                       labels = scales::percent_format(accuracy = 1),
+                       breaks = seq(0, 1, 0.5) %union% c(0.95),
+                       expand = c(0, 0)) +
+    ggplot2::scale_x_continuous(name = "PC axes",
+                       breaks = seq(0, 1000, 50) %union% c(n_independent_axes),
+                       expand = c(0, 0)) +
+    ggplot2::theme(axis.text.x = ggplot2::element_text(angle = 90, vjust = 0.5, hjust = 1))
+  } %>%
+  myggsave(name = "gut_pca_variance", width = 5, height = 5)
+```
+
+# Ancom BC
+
+```{r}
+ancombc2_species <- ANCOMBC::ancombc2(data = tse_species,
+                                      fix_formula = "INCIDENT_HTN + BL_AGE + MEN + BMI + PREVAL_DIAB.col_from_pheno + HFC + PREVAL_HFAIL_STRICT.col_from_pheno + CURR_SMOKE",
+                         assay.type = "counts",
+                         p_adj_method = "fdr",
+                         verbose = TRUE,
+                         neg_lb = TRUE)
+```
+
+## Ancom BC results
+          
+```{r}
+adjust_results <- function(x, n, pcol = "p_") {
+  dplyr::mutate(x, dplyr::across(starts_with(pcol), ~pmin(1, .x*n), .names = '{.col}_adj'))
+}
+```
+
+```{r}
+ancombc2_species$res %>%
+  dplyr::select(taxon, contains("INCIDENT_HTN")) %>% 
+  adjust_results(n_independent_axes) %>%
+  dplyr::arrange(p_INCIDENT_HTN1_adj) %>% 
+  round_numeric_columns() %>% 
+  DT::datatable(caption = "Log Fold Changes in Bacterial Species")
+```
+
+# DESeq2
+
+## DESeq2 models
+
+```{r}
+dds_species <- tse_species %>%
+  DESeq2::DESeqDataSet(~INCIDENT_HTN + BL_AGE + MEN + BMI + PREVAL_DIAB.col_from_pheno + HFC + PREVAL_HFAIL_STRICT.col_from_pheno + CURR_SMOKE) %>% 
+  DESeq2::DESeq()
+```
+
+## DESeq2 results
+
+```{r}
+dds_species %>% DESeq2::results()
+```
+
+
+```{r}
+{ df_dds_species <- dds_species %>%
+    DESeq2::results(name = "INCIDENT_HTN_1_vs_0") %>%
+    tibble::as_tibble(rownames = "taxa") } %>%
+  adjust_results(n_independent_axes, pcol = "pvalue") %>%
+  dplyr::arrange(pvalue_adj) %>%
+  round_numeric_columns() %>% 
+  DT::datatable(caption = "Log Fold Changes in Bacterial Species")
+```
+

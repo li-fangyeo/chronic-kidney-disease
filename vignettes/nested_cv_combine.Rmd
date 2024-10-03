@@ -1,0 +1,335 @@
+---
+title: "XGboost for the feature importance for each potentially causally linked metabolic measure"
+author: "Joonatan Palmu"
+date: "`r format(Sys.time(), '%d.%m.%Y')`"
+output:
+  rmdformats::html_clean:
+    self_contained: true
+    thumbnails: false
+    lightbox: true
+    gallery: true
+---
+
+# Init
+
+```{css, echo = FALSE}
+.page-inner, #content{
+  max-width:1920px !important;
+}
+``` 
+
+
+```{r options, include=FALSE}
+knitr::opts_chunk$set(include = TRUE, echo = TRUE, message = FALSE, results='asis', cache=FALSE, warning=FALSE, collapse = TRUE)
+```
+
+# Library
+
+```{r}
+library(magrittr)
+```
+
+# Devtools
+
+```{r devtools}
+devtools::load_all()
+```
+
+## Command line arguments
+
+```{r}
+args <- list(optparse::make_option("--results", 
+                                   type = "character", 
+                                   default = "nested_xgboost_cox_cv_.*-20240220_095159.rds", 
+                                   help = "Result iteration pattern [default %default]")) %>%
+  optparse::OptionParser(option_list = .) %>% 
+  optparse::parse_args()
+```
+
+```{r}
+args %>% tibble::enframe(name = "Option", value = "Argument") %>% knitr::kable()
+```
+
+## Function factories
+
+```{r}
+mysave <- mysavefactory()
+```
+
+## Plot settings
+
+```{r}
+ggplot2::theme_set(ggthemes::theme_tufte(base_family = "sans", base_size = 12) +
+                   ggplot2::theme(
+                              panel.border = ggplot2::element_rect(colour = "black", fill = NA),
+                              panel.background = ggplot2::element_rect(fill = "white", color = "white"),
+                              plot.background = ggplot2::element_rect(fill = "white", color = "white"), 
+                              axis.text = ggplot2::element_text(colour = "black", size = 10),
+                              aspect.ratio = 1))
+```
+
+# Load previously run nested XGboost models
+
+```{r}
+result_files <- list.files(path = "rds", pattern = args$results, full.names = TRUE)
+```
+
+```{r}
+result_files %>%
+  tibble::as_tibble() %>% 
+  DT::datatable()
+```
+
+```{r}
+results <- result_files %>% 
+  purrr::map(nested_xgboost_cox_cv_load) %>%
+  rlang::set_names(., glue::glue("model_{seq_along(.)}")) 
+```
+
+## Harrell's statistic
+
+```{r}
+df_harrell <- results %>%
+  purrr::list_flatten(name_spec = "{outer}_{inner}") %>% 
+  purrr::map_df(nested_xgboost_cox_cv_harrell, .id = "model")
+```
+
+```{r}
+df_harrell %>% DT::datatable()
+```
+
+
+```{r}
+df_harrell %>%
+  dplyr::summarize(mean = mean(index),
+                   sd = sd(index)) %>%
+  DT::datatable()
+```
+
+## Feature gain
+
+```{r}
+df_gain <- results %>%
+  purrr::list_flatten(name_spec = "{outer}_{inner}") %>%
+  purrr::map_df(~xgboost::xgb.importance(colnames(.x$matrix), .x$model), .id = "model")
+```
+
+```{r}
+df_gain %>%
+  dplyr::summarize(Gain = sum(Gain), .by = Feature) %>% 
+  dplyr::arrange(desc(Gain)) %>%
+  DT::datatable(caption = "Feature gain")
+```
+
+### Features better than randomness
+
+```{r}
+n_features <- df_gain %>%
+  dplyr::summarize(Gain = sum(Gain), .by = Feature) %>% 
+  dplyr::arrange(desc(Gain)) %>%
+  dplyr::mutate(position = dplyr::row_number() - 1) %>% 
+  dplyr::filter(stringr::str_detect(Feature, "rnorm_")) %>%
+  dplyr::pull(position) %>%
+  min()
+```
+
+Observed number of `r n_features` better than random features.
+
+### Naming scheme
+
+```{r}
+df_importance <- df_gain %>%
+  dplyr::mutate(model = stringr::str_replace(model, "_[0-9]*$", "")) %>% 
+  dplyr::mutate(Gain_scaled = Gain/length(results))
+```
+
+```{r}
+c_importance_order <- df_importance %>%
+  dplyr::summarize(sum = sum(Gain_scaled), .by = Feature) %>%
+  dplyr::arrange(sum) %>% 
+  dplyr::top_n(n_features, wt = sum) %>% 
+  dplyr::pull(Feature)
+```
+
+### XGBoost importance
+
+```{r}
+{ panel_a <- df_importance %>%
+    dplyr::filter(Feature %in% c_importance_order) %>%
+    dplyr::summarize(Gain_scaled = sum(Gain_scaled), .by = c(Feature, model)) %>%
+    dplyr::mutate(Feature = factor(Feature, levels = c_importance_order)) %>% 
+    ggplot2::ggplot(ggplot2::aes(x = Feature, y = Gain_scaled, fill = model, color = model)) +
+    ggplot2::geom_bar(position='stack', stat = "identity") +
+    ggplot2::coord_flip() +
+    ggplot2::scale_color_grey(start = 0, end = 0.9) +  
+    ggplot2::scale_fill_grey(start = 0, end = 0.9) +
+    ggplot2::scale_x_discrete(name = NULL, expand = c(0, 0)) +
+    ggplot2::scale_y_continuous(name = "Feature gain", expand = c(0, 0)) +
+    ggplot2::theme(legend.position = "none",
+                   panel.grid.major = ggplot2::element_blank(),
+                   panel.grid.minor = ggplot2::element_blank()) } %>%
+  mysave(name = "xgboost_importance", width = 12, height = 12)
+```
+
+
+## Calculate SHAPviz object
+
+```{r}
+calculate_shaps <- function(x, vars) {
+  object <- shapviz::shapviz(x$model, X = x$data, X_pred = x$matrix)
+  S <- shapviz::get_shap_values(object) %>%
+    tibble::as_tibble() %>%
+    tibble::add_column(ids = x$ids)
+  X <- shapviz::get_feature_values(object) %>%
+    tibble::as_tibble() %>%
+    tibble::add_column(ids = x$ids)
+  list(X = X, S = S)
+}
+```
+
+```{r}
+shap_interactions <- results %>%
+  purrr::list_flatten(name_spec = "{outer}_{inner}") %>%
+  purrr::map(calculate_shaps)
+```
+
+## SHAP beeswarm
+
+```{r}
+S_subset <- shap_interactions %>%
+  purrr::map_df(~.x$S[, c_importance_order %union% "ids"], .id = "model") %>% 
+  dplyr::summarize(dplyr::across(dplyr::one_of(c_importance_order), median), .by = ids) %>%
+  tibble::column_to_rownames("ids") %>% 
+  as.matrix()
+```
+
+```{r}
+X_subset <- shap_interactions %>%
+  purrr::map_df(~.x$X[, c_importance_order %union% "ids"], .id = "model") %>% 
+  dplyr::summarize(dplyr::across(dplyr::one_of(c_importance_order), median), .by = ids) %>% 
+  dplyr::mutate(dplyr::across(dplyr::one_of(c_importance_order), shapviz:::.min_max_scale)) %>%
+  tibble::column_to_rownames("ids") %>% 
+  as.matrix()
+```
+
+```{r}
+df_shap <- as.data.frame.table(S_subset, responseName = "value") %>%
+  dplyr::mutate(Feature = factor(Var2, levels = c_importance_order)) %>% 
+  dplyr::mutate(color = as.data.frame.table(X_subset)$Freq) %>%
+  tidyr::drop_na()
+```
+
+```{r}
+panel_b <- ggplot2::ggplot(df_shap, ggplot2::aes(x = value, y = Feature)) +
+  ggplot2::geom_vline(xintercept = 0, color = "darkgray") +
+  ggplot2::geom_point(ggplot2::aes(color = color),
+                      position = shapviz:::position_bee(width = 0.4, adjust = 0.5),
+                      size = 1,
+                      alpha = 1) +
+  ggplot2::scale_colour_gradientn(colours = c("blue", "red"),
+                                  breaks = c(0, 1),
+                                  labels = c("low", "high")) +
+  ggplot2::labs(x = "SHAP value", y = ggplot2::element_blank(), color = "Feature value")
+```
+
+```{r}
+mysave(panel_b, name = "xgboost_beeswarm", width = 15, height = 10)
+```
+
+
+## Partial dependecy plot
+
+```{r}
+pdp_data_function <- function(x, results, ...) {
+  feature <- x[[1]]
+  model_number <- x[[2]]
+  model <- results[[model_number]]$model
+  vars <- results[[model_number]]$vars
+  data <- results[[model_number]]$data %>%
+    dplyr::select(one_of(vars))
+  
+  pdp::partial(model,
+               pred.var = feature,
+               train =  data,
+               type = "regression",
+               plot = FALSE) %>%
+    dplyr::select(abundance = {{feature}}, yhat) %>%
+    dplyr::mutate(model = model_number, Feature = feature)
+}
+```
+
+```{r}
+pdp_results <- results %>%
+  purrr::list_flatten(name_spec = "{outer}_{inner}")
+```
+
+```{r}
+c_factors <- X_subset %>%
+  tibble::as_tibble() %>%
+  dplyr::summarise_all(dplyr::n_distinct) %>%
+  tidyr::gather(column, n_distinct) %>%
+  dplyr::filter(n_distinct <= 10) %>%
+  dplyr::pull(column)
+```
+
+```{r}
+c_importance_order_cont <- c_importance_order %difference% c_factors 
+```
+
+```{r}
+plot_data <- c_importance_order_cont %>% 
+  purrr::cross2(seq_along(pdp_results)) %>%
+  purrr::map_df(~pdp_data_function(.x, pdp_results))
+```
+
+```{r}
+abund_min <- plot_data %>%
+  dplyr::summarize(min = min(abundance), .by = c(Feature, model))
+
+yhat_min <- dplyr::full_join(plot_data, abund_min, by = dplyr::join_by(Feature, model)) %>% 
+  dplyr::filter(abundance == min) %>%
+  dplyr::select(Feature, model, yhat_min = yhat)
+
+plot_data_norm <- dplyr::full_join(plot_data, yhat_min, by = dplyr::join_by(Feature, model)) %>%
+  dplyr::mutate(yhat_norm = (yhat - yhat_min)/yhat_min) %>%
+  dplyr::mutate(abundance_norm = abundance) %>%
+  dplyr::mutate(taxa = forcats::fct_rev(factor(Feature, levels = c_importance_order)))
+```
+
+```{r}
+panel_c <- plot_data_norm %>%
+  dplyr::filter(Feature %in% tail(c_importance_order_cont, 18)) %>% 
+  ggplot2::ggplot(ggplot2::aes(x = abundance_norm, y = yhat_norm)) +
+  ggplot2::facet_wrap(~forcats::fct_rev(Feature), scales = "free_x", ncol = 6) + 
+  ggplot2::geom_line(ggplot2::aes(group = model), alpha = 0.2) +
+  ggplot2::geom_hline(yintercept = 0) +
+  ggplot2::geom_smooth(se=FALSE, colour="red", span=0.3, linetype="11", method = "gam") +
+  ggplot2::scale_color_grey(start = 0, end = 0.9) +
+  ggplot2::guides(color = "none") +
+  ggplot2::scale_x_continuous(name = "Partial dependency", expand = c(0, 0)) +
+  ggplot2::scale_y_continuous(name = NULL, expand = c(0, 0), lim = c(-1, 1)) +
+  ggplot2::theme(strip.text.x = ggplot2::element_text(hjust = 0))
+```
+
+```{r}
+mysave(panel_c, name = "xgboost_pdp", width = 15, height = 10)
+```
+
+# Panel plot
+
+```{r}
+layouts <- c(patchwork::area(t = 1, l = 1, b = 1, r = 1),
+             patchwork::area(t = 1, l = 2, b = 1, r = 2),
+             patchwork::area(t = 2, l = 1, b = 2 , r = 2))
+```
+
+```{r}
+{ patchwork::wrap_plots(panel_a,
+                        panel_b + ggplot2::theme(axis.text.y = ggplot2::element_blank()),
+                        patchwork::free(panel_c)) +
+    patchwork::plot_layout(design = layouts,
+                           widths = c(1, 1),
+                           heights = c(1, 1)) + 
+    patchwork::plot_annotation(tag_levels = 'A') } %>%
+  mysave(., name = "xgboost", width = 12, height = 10)
+```

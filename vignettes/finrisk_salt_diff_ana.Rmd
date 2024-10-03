@@ -1,0 +1,461 @@
+---
+title: "Impact of Dietary Salt Intake on Gut Microbiota Composition in FINRISK 2002"
+author: "Joonatan Palmu"
+date: "`r format(Sys.time(), '%d.%m.%Y')`"
+output:
+  rmdformats::robobook:
+    self_contained: true
+    thumbnails: false
+    lightbox: true
+    gallery: true
+---
+
+# Setup
+
+```{css, echo = FALSE}
+.page-inner, #content{
+  max-width:1920px !important;
+}
+``` 
+
+```{r libraries}
+library(magrittr)
+```
+
+```{r load functions}
+devtools::load_all()
+```
+
+## Command line arguments
+
+```{r}
+args <- list(
+  optparse::make_option(c("-e", "--east"), action="store_true", default=FALSE, help="Exclude Eastern Finland subpopulation [default \"%default\"]"),
+  optparse::make_option(c("-w", "--west"), action="store_true", default=FALSE, help="Exclude Eastern Finland subpopulation [default \"%default\"]")) %>% 
+  optparse::OptionParser(option_list = .) %>%
+  optparse::parse_args()
+```
+
+```{r}
+args %>% tibble::enframe(name = "Option", value = "Argument") %>% DT::datatable()
+```
+
+## Formatting options
+
+```{r options, echo = FALSE}
+knitr::opts_chunk$set(include = TRUE, echo = TRUE, message = FALSE, results='asis', cache=FALSE, warning=FALSE, error = TRUE)
+```
+
+    
+```{r define ggplot settings}
+myggsave <- myggsavefactory()
+ggplot2::theme_set(ggthemes::theme_tufte(base_family = "sans", base_size = 12) +
+                   ggplot2::theme(
+                              panel.border = ggplot2::element_rect(colour = "black", fill = NA),
+                              axis.text = ggplot2::element_text(colour = "black", size = 10),
+                              aspect.ratio = 1))
+```
+    
+# Data definitions
+
+```{r}
+vars <- list(BL_AGE = "Age",
+          MEN = "Men",
+          BMI = "BMI",
+          CURR_SMOKE = "Smoking",
+          ALKI2_FR02 = "Alcohol",
+          Q57X = "Physical activity",
+          PREVAL_DIAB.col_from_endpoints = "Diabetes",
+          dUNA = "24‐Hour Sodium Excretion",
+          KREA_ENTS = "Creatinine",
+          HFC = "Healthy Food Choices",
+          EAST = "Eastern Finland") 
+```
+
+```{r}
+( tse <- readRDS("data/tse_gg2_MGS_FR02.rds") %>%
+    mia::transformAssay(assay.type = "counts", method = "relabundance") %>% 
+    tse_filter(GRAVID %in% c(1, NA),
+               BL_USE_RX_J01_1mo %in% c(0, NA)) %>% 
+    tse_mutate(dplyr::across(c(MEN, CURR_SMOKE, Q57X, PREVAL_DIAB.col_from_endpoints), as.factor)) %>% 
+    tse_mutate(dUNA = NA.* U_VIRTSA_YHT/1000) %>%
+    tse_add_food_score(col = HFC) %>% 
+    { if (args$east) tse_filter(., EAST == 0) else . } %>% 
+    { if (args$west) tse_filter(., EAST == 1) else . } %>% 
+    tse_select(names(vars)) %>% 
+    tse_filter(dplyr::if_all(dplyr::one_of(names(vars)), not_na)) %>%
+    mia::estimateDiversity(assay.type = "counts", index = "shannon", name = "shannon") ) 
+```
+
+# Characteristics
+
+```{r}
+tse %>%
+  tse_meta(rownames = FALSE) %>% 
+  mytableone(vars)
+```
+
+# Covariate correlations
+
+```{r}
+c("BL_AGE", "BMI", "ALKI2_FR02", "KREA_ENTS", "HFC") %>%
+  rlang::set_names() %>% 
+  purrr::map(~cor.test(as.formula(glue::glue("~{.x} + dUNA")), method = "pearson", data = tse_meta(tse))) %>%
+  purrr::map_df(broom::tidy, .id = "model") %>%
+  round_numeric_columns() %>% 
+  DT::datatable(caption = "Covariate correlations with dU-Na")
+```
+
+# Diversity
+
+## Alpha diversity
+
+```{r}
+tse %>%
+  tse_meta() %>%
+  lm(scale(shannon) ~ dUNA + BL_AGE + MEN + CURR_SMOKE + ALKI2_FR02 + Q57X + PREVAL_DIAB.col_from_endpoints + KREA_ENTS, data = .) %>%
+  broom::tidy() %>%
+  round_numeric_columns() %>% 
+  DT::datatable(caption = "Alpha diversity")
+```
+
+## Beta diveristy
+
+```{r}
+calculate_beta_diversity <- function(tse) {
+  mia::mergeFeaturesByRank(tse, rank = "Species") %>% 
+    mia::transformAssay(method = "relabundance") %>%
+    mia::runRDA(assay.type = "relabundance",
+                formula = assay ~ BL_AGE + MEN + CURR_SMOKE + ALKI2_FR02 + Q57X + PREVAL_DIAB.col_from_endpoints + KREA_ENTS + dUNA,
+                distance = "bray",
+                na.action = na.exclude)
+}
+```
+
+```{r}
+tse_beta <- compute_or_load_result(function(x) calculate_beta_diversity(tse), "cache/beta-diversity-salt.rds")
+```
+
+```{r}
+rda_info <- attr(SingleCellExperiment::reducedDim(tse_beta, "RDA"), "significance")
+```
+
+```{r}
+rda_info$permanova %>% 
+  DT::datatable(caption = "Beta diversity (PERMANOVA)")
+```
+
+```{r}
+rda_info$homogeneity %>% 
+  DT::datatable(caption = "PERMANOVA homogeneity assumption")
+```
+
+
+```{r}
+{ miaViz::plotRDA(tse_beta,
+                "RDA",
+                add.vectors = FALSE,
+                add.ellipse = FALSE,
+                colour_by = "dUNA") +
+    ggplot2::scale_color_gradient(low="white", high="black") } %>% 
+  myggsave("hypertension_rda", width = 10, height = 10)
+```
+
+
+
+# Common taxa
+
+## General
+
+```{r}
+( tse_general <- mia::subsetByPrevalentFeatures(tse, 
+                                              detection = 0.1/100,
+                                              prevalence = 1/100,
+                                              as_relative = TRUE) )
+```
+
+```{r, fig.cap="Common bacterial genera", out.width="50%"}
+{ miaViz::plotAbundanceDensity(tse_general,
+                          layout = "jitter",
+                          assay.type = "relabundance",
+                          n = min(nrow(tse_general), 40),
+                          point_size = 1,
+                          point_shape = 19,
+                          point_alpha = 0.1) + 
+  ggplot2::scale_x_log10(label=scales::percent) } %>%
+  myggsave(name = "abundances_general", width = 10, height = 10)
+```
+
+
+## Genus
+
+```{r}
+( tse_genus <- mia::subsetByPrevalentFeatures(tse, rank = "Genus",
+                                              detection = 0.1/100,
+                                              prevalence = 1/100,
+                                              as_relative = TRUE) )
+```
+
+```{r, fig.cap="Common bacterial genera", out.width="50%"}
+{ miaViz::plotAbundanceDensity(tse_genus,
+                          layout = "jitter",
+                          assay.type = "relabundance",
+                          n = min(nrow(tse_genus), 40),
+                          point_size = 1,
+                          point_shape = 19,
+                          point_alpha = 0.1) + 
+  ggplot2::scale_x_log10(label=scales::percent) } %>%
+  myggsave(name = "abundances_genus", width = 10, height = 10)
+```
+
+## Species
+
+```{r}
+tse_species <- mia::subsetByPrevalentFeatures(tse, rank = "Species",
+                                              detection = 0.1/100,
+                                              prevalence = 1/100,
+                                              as_relative = TRUE)
+```
+
+```{r, fig.cap="Common bacterial species", out.width="50%"}
+{ miaViz::plotAbundanceDensity(tse_species,
+                          layout = "jitter",
+                          assay.type = "relabundance",
+                          n = min(nrow(tse_genus), 40),
+                          point_size = 1,
+                          point_shape = 19,
+                          point_alpha = 0.1) + 
+  ggplot2::scale_x_log10(label=scales::percent) } %>%
+  myggsave(name = "abundances_species", width = 10, height = 10)
+```
+
+
+# Principal component analysis
+
+```{r}
+df_counts <- SummarizedExperiment::assay(tse, "counts") %>% t %>% tibble::as_tibble()
+```
+
+```{r}
+pca <- prcomp(df_counts)
+```
+
+```{r}
+n_independent_axes <- broom::tidy(pca, matrix = "eigenvalues") %>%
+  dplyr::filter(cumulative < 0.95) %>%
+  nrow %>%
+  add(1)
+```
+
+
+```{r, fig.cap="PCA for bacterial counts", out.width="50%"}
+{ broom::tidy(pca, matrix = "eigenvalues") %>%
+    ggplot2::ggplot(ggplot2::aes(x = PC))+
+    ggplot2::geom_bar(ggplot2::aes(y = cumulative),
+             stat = "identity",
+             fill = "steelblue",
+             colour = "steelblue",
+             width = 1) +
+    ggplot2::geom_bar(ggplot2::aes(y = percent),
+             stat = "identity",
+             fill = "red",
+             colour = "red",
+             width = 1) +
+    ggplot2::geom_hline(yintercept = 0.95, linetype = 2) +
+    ggplot2::geom_vline(xintercept = n_independent_axes, linetype = 2) +
+    ggplot2::scale_y_continuous(name = "Proportion of variance",
+                       labels = scales::percent_format(accuracy = 1),
+                       breaks = seq(0, 1, 0.5) %union% c(0.95),
+                       expand = c(0, 0)) +
+    ggplot2::scale_x_continuous(name = "PC axes",
+                       breaks = seq(0, 1000, 50) %union% c(n_independent_axes),
+                       expand = c(0, 0)) +
+    ggplot2::theme(axis.text.x = ggplot2::element_text(angle = 90, vjust = 0.5, hjust = 1))
+  } %>%
+  myggsave(name = "gut_pca_variance", width = 5, height = 5)
+```
+
+# Ancom BC
+
+```{r}
+ancombc2_general <- ANCOMBC::ancombc2(data = tse_general,
+                         fix_formula = "dUNA + BL_AGE + MEN + CURR_SMOKE + ALKI2_FR02 + Q57X + PREVAL_DIAB.col_from_endpoints + KREA_ENTS",
+                         assay.type = "counts",
+                         p_adj_method = "fdr",
+                         verbose = TRUE,
+                         neg_lb = TRUE)
+```
+
+
+```{r}
+ancombc2_genus <- ANCOMBC::ancombc2(data = tse_genus,
+                         tax_level = "Genus",
+                         fix_formula = "dUNA + BL_AGE + MEN + CURR_SMOKE + ALKI2_FR02 + Q57X + PREVAL_DIAB.col_from_endpoints + KREA_ENTS",
+                         assay.type = "counts",
+                         p_adj_method = "fdr",
+                         verbose = TRUE,
+                         neg_lb = TRUE)
+```
+
+```{r}
+ancombc2_species <- ANCOMBC::ancombc2(data = tse_species,
+                         tax_level = "Species",
+                         fix_formula = "dUNA + BL_AGE + MEN + CURR_SMOKE + ALKI2_FR02 + Q57X + PREVAL_DIAB.col_from_endpoints + KREA_ENTS",
+                         assay.type = "counts",
+                         p_adj_method = "fdr",
+                         verbose = TRUE,
+                         neg_lb = TRUE)
+```
+
+## Ancom BC results
+          
+```{r}
+adjust_results <- function(x, n) {
+  dplyr::mutate(x, dplyr::across(starts_with("p_"), ~pmin(1, .x*n), .names = '{.col}_adj'))
+}
+```
+
+```{r}
+ancombc2_general$res %>%
+  dplyr::select(taxon, contains("dUNA")) %>%
+  dplyr::right_join(SummarizedExperiment::rowData(tse) %>% tibble::as_tibble(rownames = "taxon"), ., by = "taxon") %>%
+  dplyr::select(-taxon, -Kingdom, -Confidence) %>% 
+  adjust_results(n_independent_axes) %>%
+  dplyr::arrange(p_dUNA_adj) %>% 
+  round_numeric_columns() %>%
+  DT::datatable(caption = "Log Fold Changes for unagglomerated taxa")
+```
+
+```{r}
+ancombc2_genus$res %>%
+  dplyr::select(taxon, contains("dUNA")) %>% 
+  adjust_results(n_independent_axes) %>%
+  dplyr::arrange(p_dUNA_adj) %>% 
+  round_numeric_columns() %>%
+  DT::datatable(caption = "Log Fold Changes in Bacterial Genera")
+```
+
+
+```{r}
+ancombc2_species$res %>%
+  dplyr::select(taxon, contains("dUNA")) %>% 
+  adjust_results(n_independent_axes) %>%
+  dplyr::arrange(p_dUNA_adj) %>% 
+  round_numeric_columns() %>% 
+  DT::datatable(caption = "Log Fold Changes in Bacterial Species")
+```
+
+# DESeq2
+
+## DESeq2 models
+
+```{r}
+dds_genus <- tse_genus %>%
+  DESeq2::DESeqDataSet(~dUNA + BL_AGE + MEN + CURR_SMOKE + ALKI2_FR02 + Q57X + PREVAL_DIAB.col_from_endpoints + KREA_ENTS) %>% 
+  DESeq2::DESeq()
+```
+
+```{r}
+dds_species <- tse_species %>%
+  DESeq2::DESeqDataSet(~dUNA + BL_AGE + MEN + CURR_SMOKE + ALKI2_FR02 + Q57X + PREVAL_DIAB.col_from_endpoints + KREA_ENTS) %>% 
+  DESeq2::DESeq()
+```
+
+## DESeq2 results
+
+
+```{r}
+{ df_dds_genus <- dds_genus %>%
+  DESeq2::results(name = "dUNA") %>%
+    tibble::as_tibble(rownames = "taxa") } %>%
+  round_numeric_columns() %>% 
+  DT::datatable(caption = "Log Fold Changes in Bacterial Genera")
+```
+
+```{r}
+{ df_dds_species <- dds_species %>%
+  DESeq2::results(name = "dUNA") %>%
+    tibble::as_tibble(rownames = "taxa") } %>%
+  round_numeric_columns() %>% 
+  DT::datatable(caption = "Log Fold Changes in Bacterial Species")
+```
+
+## DESeq2 plot
+
+```{r}
+df_tile_plot <- df_dds_species %>% 
+  dplyr::right_join(SummarizedExperiment::rowData(tse_species) %>% tibble::as_tibble(rownames = "taxa"), ., by = "taxa") %>%
+  dplyr::filter(padj < 0.05) %>% 
+  dplyr::select(taxa, Family, Genus, Species, log2FoldChange)
+```
+
+```{r}
+{ ggplot2::ggplot(df_tile_plot, ggplot2::aes(y = Species, x = Family, fill = log2FoldChange)) +
+    ggplot2::geom_raster() +
+    ggplot2::scale_fill_gradient2(name = "Log2 fold change",
+                                  low = "darkblue",
+                                  mid = "white",
+                                  high = "darkred",
+                                  midpoint = 0,
+                                  limits = c(-0.01, 0.01)) +
+    ggplot2::coord_fixed() +
+    ggplot2::theme(axis.text.x = ggplot2::element_text(angle = 90, vjust = 0.5, hjust=1)) } %>% 
+  myggsave(name = "tile_significant", width = 20, height = 10)
+```
+
+
+
+## Diagnostic plots
+
+```{r}
+tse_significants <- ancombc2_species$res %>% 
+  dplyr::filter(q_dUNA < 0.05) %>%
+  dplyr::pull(taxon) %>% 
+  tse_species[., ]
+```
+
+```{r}
+SummarizedExperiment::rowData(tse_significants)[["prevalence"]] <-
+  mia::getPrevalence(tse_significants, detection = 1/100, sort = FALSE, assay.type = "counts", as_relative = TRUE)
+```
+
+```{r, fig.cap="Prevalences for significant taxa", out.width="50%"}
+scater::plotRowData(tse_significants, "prevalence", colour_by = "Species") %>%
+  myggsave(name = "prevalance_significant", width = 10, height = 5)
+```
+
+```{r, fig.cap="Relative abundances for significant taxa", out.width="50%"}
+{ tse_significants %>%
+  tse_mutate(dUNA_quartiles = factor(dplyr::ntile(dUNA, 4))) %>% 
+    miaViz::plotAbundanceDensity(tse_significants,
+                                 layout = "density",
+                                 assay.type = "relabundance",
+                                 colour_by = "dUNA_quartiles",
+                                 point_alpha = 1/10) +
+    ggplot2::scale_x_log10() } %>%
+  myggsave(name = "density_significant", width = 10, height = 5)
+
+```
+
+
+```{r, fig.cap="Scatter plots for significant taxa", out.width="50%"}
+{ mia::meltAssay(tse_significants,
+                 add_row_data = TRUE,
+                 add_col_data = TRUE,
+                 assay.type = "relabundance") %>% 
+    ggplot2::ggplot(ggplot2::aes(x = relabundance, y = dUNA)) +
+    ggplot2::facet_wrap(~FeatureID) +
+    ggplot2::geom_point(size = 0.5) +
+    ggplot2::geom_smooth(method = 'lm', size = 0.5) +
+    ggplot2::scale_x_log10() +
+    ggplot2::scale_y_log10()} %>% 
+  myggsave(name = "scatter_significant", width = 10, height = 5)
+
+```
+
+# Session info
+
+```{r, eval = FALSE}
+sessionInfo()
+```
+

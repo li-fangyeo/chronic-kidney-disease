@@ -1,0 +1,208 @@
+---
+title: "ANCOM BC Incident CKD"
+author: "Joonatan Palmu"
+date: "`r format(Sys.time(), '%d.%m.%Y')`"
+output:
+  rmdformats::robobook:
+    self_contained: true
+    thumbnails: false
+    lightbox: true
+    gallery: true
+---
+
+# Setup
+
+```{css, echo = FALSE}
+.page-inner, #content{
+  max-width:1920px !important;
+}
+``` 
+
+```{r libraries}
+library(magrittr)
+```
+
+```{r load functions}
+devtools::load_all()
+```
+
+## Command line arguments
+
+```{r}
+args <- list(
+  optparse::make_option("--outcome", default = "INCIDENT_CKD", type = "character", help = "Outcome [default %default]"),
+  optparse::make_option("--detection", type = "numeric", default = 0.1/100, help = "Detection limit [default %default]"),
+  optparse::make_option("--prevalence", type = "numeric", default = 1/100, help = "Prevalence limit [default %default]")) %>% 
+  optparse::OptionParser(option_list = .) %>%
+  optparse::parse_args()
+```
+
+```{r}
+stopifnot(args$model %in% c("INCIDENT_CKD", "PREVAL_CKD"))
+```
+
+```{r}
+args %>% tibble::enframe(name = "Option", value = "Argument") %>% DT::datatable()
+```
+
+## Formatting options
+
+```{r options, echo = FALSE}
+knitr::opts_chunk$set(include = TRUE, echo = TRUE, message = FALSE, results='asis', cache=FALSE, warning=FALSE, error = TRUE)
+```
+
+# Data definitions
+
+```{r}
+vars <- list(BL_AGE = "Age",
+             MEN = "Men",
+             BMI = "BMI",
+             PREVAL_DIAB.col_from_endpoints = "Diabetes",
+             SYSTM = "Systolic blood pressure",
+             BP_TREAT = "Antihypertensive medication",
+             PREVAL_HFAIL_STRICT.col_from_endpoints = "Heart failure",
+             PREVAL_CKD = "Prevalent CKD",
+             INCIDENT_CKD = "Incident CKD",
+             CKD_AGEDIFF = "CKD Agediff",
+             CURR_SMOKE = "Smoking",
+             PREVAL_AUTOIMMUN.col_from_endpoints = "Autoimmune disease",
+             KREA_ENTS = "Creatinine",
+             GFR = "Glomerulal filtration rate",
+             UAlbKrea = "Urine Albumin-Creatinine Ratio",
+             EAST = "Eastern Finland",
+             shannon = "Shannon diversity") 
+```
+
+```{r}
+tse <- readRDS("data/tse_gg2_MGS_FR02.rds") %>%
+  mia::transformAssay(assay.type = "counts", method = "relabundance") %>% 
+  mia::estimateDiversity(assay.type = "counts", index = "shannon", name = "shannon") %>%
+  tse_mutate(GFR = 0.993^round(BL_AGE) *
+               dplyr::case_when(MEN == 0 & KREA_ENTS <= 62 ~ 144*(KREA_ENTS/61.9)^-0.329,
+                                MEN == 0 & KREA_ENTS >  62 ~ 144*(KREA_ENTS/61.9)^-1.209,
+                                MEN == 1 & KREA_ENTS <= 80 ~ 141*(KREA_ENTS/79.6)^-0.411,
+                                MEN == 1 & KREA_ENTS >  80 ~ 141*(KREA_ENTS/79.6)^-1.209)) %>%
+  tse_mutate(UAlbKrea = U_ALB/U_KREA) %>% 
+  tse_filter(GRAVID %in% c(1, NA), BL_USE_RX_J01_1mo %in% c(0, NA)) %>%
+  tse_mutate(PREVAL_CKD = dplyr::case_when(PREVAL_CKD == 1 ~ 1,
+                                              GFR < 60 ~ 1,
+                                              UAlbKrea > 3 ~ 1,
+                                              TRUE ~ 0)) %>% 
+  tse_mutate(dplyr::across(c(MEN,
+                             EAST,
+                             BP_TREAT,
+                             CURR_SMOKE,
+                             dplyr::contains("INCIDENT"),
+                             dplyr::contains("PREVAL")), as.factor)) %>% 
+  { if (args$outcome == "INCIDENT_CKD") tse_filter(., PREVAL_CKD == 0) else . } %>% 
+  tse_filter(dplyr::if_all(dplyr::one_of(names(vars) %difference% "UAlbKrea"), not_na)) %>%
+  tse_select(names(vars))
+```
+
+# Characteristics
+
+```{r}
+tse %>% 
+  tse_meta(rownames = FALSE) %>% 
+  mytableone(vars)
+```
+
+## Species
+
+```{r}
+tse_species <- mia::subsetByPrevalentFeatures(tse, rank = "Species",
+                                              detection = 0.1/100,
+                                              prevalence = 1/100,
+                                              as_relative = TRUE)
+```
+
+# Ancom BC
+
+```{r}
+pcol <- glue::glue("q_{args$outcome}1")
+```
+
+
+## East
+
+```{r}
+ancombc2_east <- tse_species %>%
+  tse_filter(EAST == 1) %>% 
+  ANCOMBC::ancombc2(data = .,
+                    fix_formula = c(args$outcome, "BL_AGE", "MEN", "BMI",
+                                    "PREVAL_DIAB.col_from_endpoints", "SYSTM",
+                                    "BP_TREAT", "CURR_SMOKE") %>%
+                      stringr::str_c(collapse = "+"),
+                    assay.type = "counts",
+                    p_adj_method = "fdr",
+                    verbose = TRUE,
+                    neg_lb = TRUE)
+```
+
+```{r}
+df_east <- ancombc2_east$res %>%
+  dplyr::select(taxon, contains(args$outcome)) %>%
+  dplyr::arrange(!!rlang::sym(pcol))
+```
+
+```{r}
+df_east %>%
+  round_numeric_columns() %>% 
+  DT::datatable(caption = "East")
+```
+
+```{r}
+df_east %>%
+  dplyr::filter(!!rlang::sym(pcol) < 0.05) %>% 
+  round_numeric_columns() %>% 
+  DT::datatable(caption = "East significants")
+```
+
+## West
+
+```{r}
+ancombc2_west <- tse_species %>%
+  tse_filter(EAST == 0) %>%
+  ANCOMBC::ancombc2(data = .,
+                    fix_formula = c(args$outcome, "BL_AGE", "MEN", "BMI",
+                                    "PREVAL_DIAB.col_from_endpoints", "SYSTM",
+                                    "BP_TREAT", "CURR_SMOKE") %>%
+                      stringr::str_c(collapse = "+"),
+                    assay.type = "counts",
+                    p_adj_method = "fdr",
+                    verbose = TRUE,
+                    neg_lb = TRUE)
+```
+
+```{r}
+df_west <- ancombc2_west$res %>%
+  dplyr::select(taxon, contains(args$outcome)) %>% 
+  dplyr::arrange(!!rlang::sym(pcol))
+```
+
+```{r}
+df_west %>%
+  round_numeric_columns() %>% 
+  DT::datatable(caption = "West")
+```
+
+
+```{r}
+df_west %>%
+  dplyr::filter(!!rlang::sym(pcol) < 0.05) %>% 
+  round_numeric_columns() %>% 
+  DT::datatable(caption = "West significant")
+```
+
+
+## Comparing east and west
+
+```{r}
+df_east %>%
+  dplyr::filter(!!rlang::sym(pcol) < 0.05) %>%
+  dplyr::left_join(df_west, by = "taxon", suffix = c("_east", "_west")) %>%
+  dplyr::select(taxon, contains("lfc"), contains("q_INCIDENT")) %>%
+  DT::datatable()
+```
+
+

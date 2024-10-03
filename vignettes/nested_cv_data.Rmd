@@ -1,0 +1,191 @@
+---
+title: "Prepare the data for the nested cv model for hypertension"
+author: "Joonatan Palmu"
+date: "`r format(Sys.time(), '%d.%m.%Y')`"
+output:
+  rmdformats::robobook:
+    self_contained: true
+    thumbnails: false
+    lightbox: true
+    gallery: true
+---
+
+# Setup
+
+```{css, echo = FALSE}
+.page-inner, #content {
+  max-width:1920px !important;
+}
+``` 
+
+```{r options, echo = FALSE}
+knitr::opts_chunk$set(include = TRUE, echo = TRUE, message = FALSE, results='asis', cache=FALSE, warning=FALSE, error = TRUE)
+```
+
+```{r load functions}
+devtools::load_all()
+```
+
+```{r}
+library(magrittr)
+```
+
+
+## Command line arguments
+
+```{r}
+args <- list(
+  optparse::make_option("--detection", type = "numeric", default = 0.1/100, help = "Detection limit [default %default]"),
+  optparse::make_option("--prevalence", type = "numeric", default = 1/100, help = "Prevalence limit [default %default]")) %>% 
+  optparse::OptionParser(option_list = .) %>% 
+  optparse::parse_args()
+```
+
+```{r}
+args %>% tibble::enframe(name = "Option", value = "Argument") %>% knitr::kable()
+```
+
+
+# Dataframes
+
+```{r}
+dfs <- list()
+```
+
+# Data definitions
+
+```{r}
+outcome <- "INCIDENT_HTN"
+agediff <- "HTN_AGEDIFF"
+idcol <- "SampleID"
+```
+
+```{r}
+forced_vars <- c("INCIDENT_HTN",
+                 "HTN_AGEDIFF",
+                 "PREVAL_HTN",
+                 "HFC",
+                 "shannon",
+                 "observed")
+```
+
+
+```{r}
+tse_raw <- readRDS("data/tse_gg2_MGS_FR02.rds")
+```
+
+```{r}
+vars <- tse_raw %>% 
+  tse_meta(rownames = "FALSE") %>% 
+  colnames() %difference% c("Sample_ID.col_from_pheno",
+                            "Sample_ID.col_from_endpoints",
+                            "Matrix.2D.tube.barcode.col_from_pheno",
+                            "Matrix.2D.tube.barcode.col_from_endpoints",
+                            "Barcode",
+                            "FID",
+                            "DNAPERM.col_from_pheno",
+                            "DNAPERM.col_from_endpoints",
+                            "BATCH.col_from_pheno",
+                            "BATCH.col_from_endpoints",
+                            "DNA_OK",
+                            "PROJECT",
+                            "REGISTERS_OK",
+                            "data_src",
+                            "BLOOD_TIME",
+                            "TUTKPVM_KAIKKI",
+                            "K_M1",
+                            "K_M2",
+                            "K_VKS",
+                            "K_TPKS",
+                            "K_CARDIAC",
+                            "APOE_BATCH",
+                            "PLASMA_FR07_ID",
+                            "PLASMA_DG07_ID",
+                            "PLASMA_DG14_ID",
+                            "GRAVID",
+                            "HYPERT_AHA",
+                            "E.HIBP") %>%
+  stringr::str_subset("_NEVT", negate = TRUE) %>%
+  tibble::tibble(col = .) %>%
+  dplyr::mutate(id = stringr::str_replace_all(col, c(".col_from_pheno" = "",
+                                                     ".col_from_endpoints" = "",
+                                                     "_AGEDIFF" = "",
+                                                     "_YEAR" = "",
+                                                     "_AGE" = "",
+                                                     "INCIDENT_" = "",
+                                                     "_YEAR" = ""))) %>%
+  dplyr::mutate(count = dplyr::n(), .by = id) %>% 
+  dplyr::filter(dplyr::n() == 1, .by = id) %>%
+  dplyr::pull(col) %union% forced_vars %>%
+  rlang::set_names()
+```
+
+```{r}
+tse <- tse_raw %>%
+  mia::transformAssay(assay.type = "counts", method = "relabundance") %>% 
+  tse_mutate(PREVAL_HTN = ifelse(PREVAL_HIBP + PREVAL_RX_RR_SPECIFIC > 0, 1, 0)) %>%
+  tse_mutate(INCIDENT_HTN = ifelse(INCIDENT_HIBP + INCIDENT_RX_RR_SPECIFIC > 0, 1, 0)) %>%
+  tse_mutate(HTN_AGEDIFF = pmin(HIBP_AGEDIFF, RX_RR_SPECIFIC_AGEDIFF)) %>% 
+  tse_filter(GRAVID %in% c(1, NA), BL_USE_RX_J01_1mo %in% c(0, NA)) %>% 
+  tse_filter(SYSTM < 140, DIASM < 90, PREVAL_HTN == 0, HYPERT_AHA == 0) %>%
+  tse_filter(dplyr::if_all(c(HTN_AGEDIFF, INCIDENT_HTN), not_na)) %>%
+  mia::estimateDiversity(assay.type = "counts", index = "shannon", name = "shannon") %>%
+  mia::estimateRichness(assay.type = "counts", index = "observed", name = "observed") %>% 
+  tse_add_food_score(HFC) %>% 
+  tse_select({{outcome}}, {{agediff}}, vars)
+```
+
+## Agglomerate prevalent features
+
+```{r}
+subset_features_partial <-  purrr::partial(mia::subsetByPrevalentFeatures,
+                                           x = tse,
+                                           detection = args$detection,
+                                           prevalence = args$prevalence,
+                                           as_relative = TRUE)
+```
+
+```{r}
+taxa_subsets <- c("Genus", "Species") %>%
+  rlang::set_names() %>%
+  purrr::map(~subset_features_partial(rank = .x))
+```
+
+## Melt TSE to data frame
+
+```{r}
+melt_tse <- function(x, method = "clr") {
+  mia::transformAssay(x, method = method, pseudocount = 1) %>% 
+    mia::meltAssay(add_row_data = TRUE, assay_name = method) %>%
+    dplyr::mutate(FeatureID = glue::glue("GUT_{FeatureID}")) %>%
+    dplyr::mutate(FeatureID = stringr::str_replace_all(FeatureID, c(" " = "_", "-" = "_"))) %>% 
+    dplyr::select(SampleID, FeatureID, clr) %>%
+    tidyr::spread(FeatureID, clr) 
+}
+```
+
+```{r}
+dfs <- taxa_subsets %>%
+  purrr::map(melt_tse, .progress = TRUE)
+```
+
+## Join data frames
+
+```{r}
+df_gg2_MGS_FR02_htn <- dfs %>%
+  purrr::reduce(dplyr::left_join, by = "SampleID") %>%
+  dplyr::full_join(tse_meta(tse), by = dplyr::join_by(SampleID == rownames)) %>%
+  dplyr::mutate_at(dplyr::vars(CDT, CRP), my_as_numeric)
+```
+
+```{r}
+usethis::use_data(df_gg2_MGS_FR02_htn, overwrite = TRUE) 
+```
+
+# Characteristics
+
+```{r}
+df_gg2_MGS_FR02_htn %>%
+  dplyr::select(-SampleID) %>% 
+  mytableone(vars = rlang::set_names(colnames(.))) 
+```

@@ -1,0 +1,178 @@
+---
+title: "XGboost for the feature importance with hypertension"
+author: "Joonatan Palmu"
+date: "`r format(Sys.time(), '%d.%m.%Y')`"
+output:
+  rmdformats::robobook:
+    self_contained: true
+    thumbnails: false
+    lightbox: true
+    gallery: true
+---
+
+# Init
+
+```{css, echo = FALSE}
+.page-inner, #content{
+  max-width:1920px !important;
+}
+``` 
+
+
+```{r options, include=FALSE}
+knitr::opts_chunk$set(include = TRUE, echo = TRUE, message = FALSE, results='asis', cache=FALSE, warning=FALSE, collapse = TRUE)
+```
+
+```{r, include=FALSE}
+start.time <- Sys.time()
+```
+
+# Devtools
+
+```{r libraries}
+library(magrittr)
+```
+
+```{r devtools}
+devtools::load_all()
+```
+
+## Command line arguments
+
+```{r}
+args <- list(
+  optparse::make_option("--seed", type = "integer", default = 2024, help = "ModelSeed [default %default]"),
+  optparse::make_option("--index", type = "integer", default = 1, help = "Repeat index [default %default]"),
+  optparse::make_option("--outer", type = "integer", default = 3, help = "Number of outer loops [default %default]"),
+  optparse::make_option("--inner", type = "integer", default = 3, help = "Number of inner loops [default %default]"),
+  optparse::make_option("--design", type = "integer", default = 36, help = "Number of design steps [default %default]"),
+  optparse::make_option("--opt", type = "integer", default = 200, help = "Number of optionsl steps [default %default]"),
+  optparse::make_option("--randoms", type = "integer", default = 10, help = "Number of random columns [default %default]"),
+  optparse::make_option("--time", type = "character", help = "Option reference time for save factory [default %default]")) %>% 
+  optparse::OptionParser(option_list = .) %>% 
+  optparse::parse_args()
+```
+
+```{r}
+args %>% tibble::enframe(name = "Option", value = "Argument") %>% knitr::kable()
+```
+
+## Function factories
+
+```{r}
+mysave <- { if(!is.null(args$time)) mysavefactory(time = lubridate::ymd_hms(args$time)) else mysavefactory() }
+```
+
+# Data definitions
+
+```{r}
+idcol <- "SampleID"
+```
+
+```{r}
+event_incident <- "INCIDENT_HTN"
+event_prevalent <- "PREVAL_HTN"
+event_agediff <- "HTN_AGEDIFF"
+```
+
+```{r}
+covariates_exclude <- c("GRAVID",
+                        "BL_USE_RX_J01_1mo",
+                        "INCIDENT_HTN",
+                        "HTN_AGEDIFF")
+```
+
+## Data
+
+```{r}
+df_gut <- df_gg2_MGS_FR02_htn %>%
+  dplyr::filter(!!rlang::sym(event_prevalent) == 0)
+```
+
+# Covariates
+
+```{r}
+randoms <- stringr::str_c("rnorm_", seq_len(args$randoms))
+```
+
+```{r}
+taxa <- df_gut %>% colnames() %>% stringr::str_subset("GUT_")
+```
+
+```{r}
+vars <- df_gut %>%
+  dplyr::select(-starts_with("GUT_")) %>% 
+  colnames() %difference%
+  c(idcol, covariates_exclude) 
+```
+
+
+# Characteristics
+
+```{r}
+df_gut %>%
+  dplyr::select(-dplyr::one_of(idcol)) %>% 
+  mytableone(vars = rlang::set_names(colnames(.))) 
+```
+
+# XGBoost
+
+## Model
+
+```{r, message=FALSE}
+results <- nested_xgboost_cox_cv_outer_loop(df_gut,
+                                            iteration = args$index,
+                                            n_outer_folds = args$outer,
+                                            n_inner_folds = args$inner,
+                                            n_design = args$design,
+                                            n_random = args$randoms,
+                                            opt_steps = args$opt,
+                                            event_incident = event_incident,
+                                            event_agediff = event_agediff,
+                                            vars = vars,
+                                            randoms = randoms,
+                                            taxa = taxa,
+                                            id = idcol,
+                                            seed = args$seed)
+```
+
+## Params
+
+```{r}
+results %>%
+  purrr::map_df(~tibble::enframe(.x$params, name = "Parameter", value = "Value"), .id = "model") %>%
+  tidyr::spread(model, Value) %>%
+  DT::datatable()
+```
+
+## Export
+
+```{r}
+save_path <- nested_xgboost_cox_cv_save(x = results, saver = mysave, name = glue::glue("nested_xgboost_cox_cv_{args$index}"))
+save_path
+```
+
+# Results
+
+## Harrell's statistic
+
+```{r}
+results %>% 
+  purrr::map_df(nested_xgboost_cox_cv_harrell, .id = "model") %>%
+  knitr::kable()
+```
+
+## Feature gain
+
+```{r}
+results %>% 
+  purrr::map(~xgboost::xgb.importance(colnames(.x$matrix), .x$model)) %>%
+  dplyr::bind_rows() %>%
+  dplyr::select(Feature, Gain) %>% 
+  dplyr::summarize(Gain = sum(Gain), .by = Feature) %>%
+  DT::datatable(caption = "Feature gain", options = list(order = list(list(2, 'desc')), pageLength = 50))
+```
+
+```{r}
+Sys.time() - start.time
+```

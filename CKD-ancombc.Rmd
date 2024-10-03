@@ -1,0 +1,223 @@
+---
+title: "CKD-Ancom-BC"
+author: "Joonatan Palmu, Li-Fang Yeo"
+date: "17th Sept 2024"
+output: html_document
+---
+```{r setup, include=FALSE} 
+knitr::opts_chunk$set(warning = FALSE) 
+```
+```{r}
+library(magrittr)
+```
+```{r}
+devtools::load_all()
+```
+Command line arguments
+```{r}
+args <- list(
+  optparse::make_option("--outcome", default = "INCIDENT_CKD", type = "character", help = "Outcome [default %default]"),
+  optparse::make_option("--detection", type = "numeric", default = 0.1/100, help = "Detection limit [default %default]"),
+  optparse::make_option("--prevalence", type = "numeric", default = 1/100, help = "Prevalence limit [default %default]")) %>% 
+  optparse::OptionParser(option_list = .) %>%
+  optparse::parse_args()
+```
+```{r}
+stopifnot(args$model %in% c("INCIDENT_CKD", "PREVAL_CKD"))
+```
+```{r}
+args %>% tibble::enframe(name = "Option", value = "Argument") %>% DT::datatable()
+```
+Formatting options
+
+Data definitions
+```{r}
+vars <- list(BL_AGE = "Age",
+             MEN = "Men",
+             BMI = "BMI",
+             PREVAL_DIAB.col_from_endpoints = "Diabetes",
+             SYSTM = "Systolic blood pressure",
+             BP_TREAT = "Antihypertensive medication",
+             PREVAL_HFAIL_STRICT.col_from_endpoints = "Heart failure",
+             PREVAL_CKD = "Prevalent CKD",
+             INCIDENT_CKD = "Incident CKD",
+             CKD_AGEDIFF = "CKD Agediff",
+             CURR_SMOKE = "Smoking",
+             PREVAL_AUTOIMMUN.col_from_endpoints = "Autoimmune disease",
+             KREA_ENTS = "Creatinine",
+             GFR = "Glomerulal filtration rate",
+             UAC = "Urine Albumin-Creatinine Ratio",
+             EAST = "Eastern Finland",
+             shannon = "Shannon diversity") 
+```
+```{r}
+tse <- readRDS("data/tse_gg2_MGS_FR02.rds") %>%
+  mia::transformAssay(assay.type = "counts", method = "relabundance") %>% 
+  mia::addAlpha(assay.type = "counts", index = "shannon", name = "shannon") %>%
+  tse_mutate(dplyr::across(c(MEN,
+                             EAST,
+                             BP_TREAT,
+                             CURR_SMOKE,
+                             dplyr::contains("INCIDENT"),
+                             dplyr::contains("PREVAL")), as.factor)) %>% 
+  tse_mutate(GFR = 0.993^round(BL_AGE) *
+               dplyr::case_when(MEN == 0 & KREA_ENTS <= 62 ~ 144*(KREA_ENTS/61.9)^-0.329,
+                                MEN == 0 & KREA_ENTS >  62 ~ 144*(KREA_ENTS/61.9)^-1.209,
+                                MEN == 1 & KREA_ENTS <= 80 ~ 141*(KREA_ENTS/79.6)^-0.411,
+                                MEN == 1 & KREA_ENTS >  80 ~ 141*(KREA_ENTS/79.6)^-1.209)) %>%
+  tse_mutate(UAC = U_ALB/U_KREA) %>% 
+  tse_filter(GRAVID %in% c(1, NA), BL_USE_RX_J01_1mo %in% c(0, NA)) %>% 
+  tse_filter(GFR >= 60, PREVAL_CKD == 0, UAC <=3 | is.na(UAC)) %>%
+  { if (args$east) tse_filter(., EAST == 0) else . } %>% 
+  { if (args$west) tse_filter(., EAST == 1) else . } %>% 
+  tse_filter(dplyr::if_all(dplyr::one_of(names(vars) %difference% "UAC"), not_na)) %>%
+  tse_select(names(vars))
+```
+Characteristics
+```{r}
+tse %>%
+  tse_meta(rownames = FALSE) %>%
+  dplyr::mutate(INCIDENT_CKD = factor(ifelse(INCIDENT_CKD == 1, "Incident CKD" , "No CKD"))) %>%
+  mytableone(vars,fo =  ~ .| INCIDENT_CKD )
+```
+Species
+```{r}
+tse_species <- mia::subsetByPrevalentFeatures(tse, rank = "Species",
+                                              detection = 0.1/100,
+                                              prevalence = 1/100,
+                                              as_relative = TRUE)
+```
+ANCOM-BC2 for Incident CKD
+```{r}
+pcol <- glue::glue("q_INCIDENT_CKD1")
+```
+```{r}
+ancombc2 <- tse_species %>%
+  ANCOMBC::ancombc2(data = .,
+                    fix_formula = c("INCIDENT_CKD", "BL_AGE", "MEN", "BMI",
+                                    "PREVAL_DIAB.col_from_endpoints", "SYSTM",
+                                    "BP_TREAT", "CURR_SMOKE","PREVAL_HFAIL_STRICT.col_from_endpoints",
+                                    "PREVAL_AUTOIMMUN.col_from_endpoints", "KREA_ENTS") %>%
+                      stringr::str_c(collapse = "+"),
+                    assay.type = "counts",
+                    p_adj_method = "fdr",
+                    verbose = TRUE,
+                    neg_lb = TRUE)
+```
+```{r}
+df_all <- ancombc2$res %>%
+  dplyr::select(taxon, contains("INCIDENT_CKD")) %>%
+  dplyr::arrange(!!rlang::sym(pcol))
+```
+
+```{r}
+df_all %>%
+  round_numeric_columns() %>% 
+  DT::datatable(caption = "All")
+```
+Species
+```{r}
+tse_species <- mia::subsetByPrevalentFeatures(tse, rank = "Species",
+                                              detection = 0.1/100,
+                                              prevalence = 1/100,
+                                              as_relative = TRUE)
+```
+ANCOM-BC2 for GFR
+```{r}
+pcol <- glue::glue("q_GFR")
+```
+```{r}
+ancombc2 <- tse_species %>%
+  ANCOMBC::ancombc2(data = .,
+                    fix_formula = c("GFR", "BL_AGE", "MEN", "BMI",
+                                    "PREVAL_DIAB.col_from_endpoints", "SYSTM",
+                                    "BP_TREAT", "CURR_SMOKE","PREVAL_HFAIL_STRICT.col_from_endpoints",
+                                    "PREVAL_AUTOIMMUN.col_from_endpoints") %>%
+                      stringr::str_c(collapse = "+"),
+                    assay.type = "counts",
+                    p_adj_method = "fdr",
+                    verbose = TRUE,
+                    neg_lb = TRUE)
+```
+```{r}
+df_all <- ancombc2$res %>%
+  dplyr::select(taxon, contains("GFR")) %>%
+  dplyr::arrange(!!rlang::sym(pcol))
+```
+
+```{r}
+df_all %>%
+  round_numeric_columns() %>% 
+  DT::datatable(caption = "GFR")
+```
+
+Species
+```{r}
+tse_species <- mia::subsetByPrevalentFeatures(tse, rank = "Species",
+                                              detection = 0.1/100,
+                                              prevalence = 1/100,
+                                              as_relative = TRUE)
+```
+ANCOM-BC2 for KREA_ENTS 
+```{r}
+pcol <- glue::glue("q_KREA_ENTS")
+```
+```{r}
+ancombc2 <- tse_species %>%
+  ANCOMBC::ancombc2(data = .,
+                    fix_formula = c("KREA_ENTS", "BL_AGE", "MEN", "BMI",
+                                    "PREVAL_DIAB.col_from_endpoints", "SYSTM",
+                                    "BP_TREAT", "CURR_SMOKE","PREVAL_HFAIL_STRICT.col_from_endpoints",
+                                    "PREVAL_AUTOIMMUN.col_from_endpoints") %>%
+                      stringr::str_c(collapse = "+"),
+                    assay.type = "counts",
+                    p_adj_method = "fdr",
+                    verbose = TRUE,
+                    neg_lb = TRUE)
+```
+```{r}
+df_all <- ancombc2$res %>%
+  dplyr::select(taxon, contains("KREA_ENTS")) %>%
+  dplyr::arrange(!!rlang::sym(pcol))
+```
+
+```{r}
+df_all %>%
+  round_numeric_columns() %>% 
+  DT::datatable(caption = "KREA_ENTS")
+```
+Species
+```{r}
+tse_species <- mia::subsetByPrevalentFeatures(tse, rank = "Species",
+                                              detection = 0.1/100,
+                                              prevalence = 1/100,
+                                              as_relative = TRUE)
+```
+ANCOM-BC2 for UAC
+```{r}
+pcol <- glue::glue("q_UAC")
+```
+```{r}
+ancombc2 <- tse_species %>%
+  ANCOMBC::ancombc2(data = .,
+                    fix_formula = c("UAC", "BL_AGE", "MEN", "BMI",
+                                    "PREVAL_DIAB.col_from_endpoints", "SYSTM",
+                                    "BP_TREAT", "CURR_SMOKE","PREVAL_HFAIL_STRICT.col_from_endpoints",
+                                    "PREVAL_AUTOIMMUN.col_from_endpoints") %>%
+                      stringr::str_c(collapse = "+"),
+                    assay.type = "counts",
+                    p_adj_method = "fdr",
+                    verbose = TRUE,
+                    neg_lb = TRUE)
+```
+```{r}
+df_all <- ancombc2$res %>%
+  dplyr::select(taxon, contains("UAC")) %>%
+  dplyr::arrange(!!rlang::sym(pcol))
+```
+
+```{r}
+df_all %>%
+  round_numeric_columns() %>% 
+  DT::datatable(caption = "UAC")
+```

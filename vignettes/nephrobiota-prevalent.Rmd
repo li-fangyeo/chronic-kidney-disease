@@ -1,0 +1,543 @@
+---
+title: "Prevalent nephro-metagenomics in FINRISK 2002"
+author: "Joonatan Palmu"
+date: "`r format(Sys.time(), '%d.%m.%Y')`"
+output:
+  rmdformats::html_clean:
+    self_contained: true
+    thumbnails: false
+    lightbox: true
+    gallery: true
+    code_folding: show
+---
+
+# Setup
+
+```{css, echo = FALSE}
+.main-container {
+  max-width:1920px !important;
+}
+```
+
+```{r libraries}
+library(magrittr)
+```
+
+```{r load functions}
+devtools::load_all()
+```
+
+## Command line arguments
+
+```{r}
+opts <- list(
+  optparse::make_option("--detection", type = "numeric", default = 0.1/100, help = "Detection limit [default %default]"),
+  optparse::make_option("--prevalence", type = "numeric", default = 1/100, help = "Prevalence limit [default %default]")) %>% 
+  optparse::OptionParser(option_list = .) %>%
+  optparse::parse_args()
+```
+
+```{r}
+opts %>% tibble::enframe(name = "Option", value = "Argument") %>% knitr::kable()
+```
+
+## Formatting options
+
+```{r options, echo = FALSE}
+knitr::opts_chunk$set(include = TRUE, echo = TRUE, message = FALSE, results='asis', cache=FALSE, warning=FALSE, error = TRUE)
+```
+
+```{r define ggplot settings}
+mysave <- mysavefactory()
+```
+
+```{r}
+{ ggthemes::theme_tufte(base_family = "sans", base_size = 12) +
+  ggplot2::theme(
+             panel.border = ggplot2::element_rect(colour = "black", fill = NA),
+             axis.text = ggplot2::element_text(colour = "black", size = 10),
+             aspect.ratio = 1) } %>%
+  ggplot2::theme_set()
+```
+    
+# Data definitions
+
+```{r}
+vars <- list(BL_AGE = "Age",
+             MEN = "Men",
+             BMI = "BMI",
+             PREVAL_DIAB.col_from_endpoints = "Diabetes",
+             SYSTM = "Systolic blood pressure",
+             BP_TREAT = "Antihypertensive medication",
+             PREVAL_HFAIL_STRICT.col_from_endpoints = "Heart failure",
+             PREVAL_CKF = "Prevalent CKD",
+             INCIDENT_CKF = "Incident CKD",
+             CKF_AGEDIFF = "CKD Agediff",
+             CURR_SMOKE = "Smoking",
+             PREVAL_AUTOIMMUN.col_from_endpoints  = "Autoimmune disease",
+             KREA_ENTS = "Creatinine",
+             GFR = "Glomerulal filtration rate",
+             UAC = "Urine Albumin-Creatinine Ratio",
+             EAST = "Eastern Finland",
+             CKD_STAGE = "Stage of chronic kidney disease",
+             shannon = "Shannon diversity") 
+```
+
+```{r}
+tse <- readRDS("data/tse_gg2_MGS_FR02.rds") %>%
+  mia::transformAssay(assay.type = "counts", method = "relabundance") %>% 
+  mia::estimateDiversity(assay.type = "counts", index = "shannon", name = "shannon") %>%
+  tse_mutate(dplyr::across(c(MEN,
+                             EAST,
+                             BP_TREAT,
+                             CURR_SMOKE,
+                             dplyr::contains("INCIDENT"),
+                             dplyr::contains("PREVAL")), as.factor)) %>% 
+  tse_mutate(GFR = 0.993^round(BL_AGE) *
+               dplyr::case_when(MEN == 0 & KREA_ENTS <= 62 ~ 144*(KREA_ENTS/61.9)^-0.329,
+                                MEN == 0 & KREA_ENTS >  62 ~ 144*(KREA_ENTS/61.9)^-1.209,
+                                MEN == 1 & KREA_ENTS <= 80 ~ 141*(KREA_ENTS/79.6)^-0.411,
+                                MEN == 1 & KREA_ENTS >  80 ~ 141*(KREA_ENTS/79.6)^-1.209)) %>%
+  tse_mutate(CKD_STAGE = factor(dplyr::case_when(GFR >= 90 ~ "Stage 1",
+                                                 dplyr::between(GFR, 60,  90) ~ "Stage 2",
+                                                 dplyr::between(GFR, 30,  60) ~ "Stage 3",
+                                                 dplyr::between(GFR, 15,  30) ~ "Stage 4",
+                                                 GFR < 15 ~ "Stage 5"))) %>% 
+  tse_mutate(UAC = U_ALB/U_KREA) %>% 
+  tse_filter(GRAVID %in% c(1, NA), BL_USE_RX_J01_1mo %in% c(0, NA)) %>%
+  tse_filter(dplyr::if_all(dplyr::one_of(names(vars) %difference% "UAC"), not_na)) %>%
+  tse_select(names(vars))
+```
+
+# Characteristics
+
+```{r}
+tse %>%
+  tse_meta(rownames = FALSE) %>%
+  dplyr::mutate(EAST = ifelse(EAST == 1, "East", "West")) %>% 
+  mytableone(vars, fo = ~. | EAST)
+```
+
+## Distributions
+
+```{r}
+{ tse %>%
+    tse_meta(rownames = FALSE) %>%
+    ggplot2::ggplot(ggplot2::aes(x = CKD_STAGE, fill = EAST)) +
+    ggplot2::geom_bar(stat = "count") +
+    ggplot2::geom_text(stat='count',
+                       ggplot2::aes(label = ..count..),
+                       color = "black",
+                       position = ggplot2::position_stack(vjust = 0.5)) +
+    ggplot2::labs(x = NULL, y = NULL) +
+    ggplot2::scale_fill_grey(start = 0.3, end = 0.5) +
+    ggplot2::scale_y_continuous(name = NULL, expand = c(0, 0)) +
+    ggplot2::scale_x_discrete(name = NULL, expand = c(0, 0)) } %>%
+  mysave(name = "nephrobiota_gfr_distribution", width = 8, height = 7)
+```
+
+# Model function definitions
+
+```{r}
+bin_krea_partial <-  purrr::partial(glm,
+                                    formula = CKD_STAGE ~
+                                    term + BL_AGE + MEN + BMI +
+                                    PREVAL_DIAB.col_from_endpoints + SYSTM + BP_TREAT +
+                                    PREVAL_HFAIL_STRICT.col_from_endpoints + CURR_SMOKE +
+                                    PREVAL_AUTOIMMUN.col_from_endpoints,
+                                    family = binomial)
+```
+
+
+```{r}
+lm_krea_partial <-  purrr::partial(lm,
+                                  formula = KREA_ENTS ~
+                                    term + BL_AGE + MEN + BMI +
+                                    PREVAL_DIAB.col_from_endpoints + SYSTM + BP_TREAT +
+                                    PREVAL_HFAIL_STRICT.col_from_endpoints + CURR_SMOKE +
+                                    PREVAL_AUTOIMMUN.col_from_endpoints)
+```
+
+```{r}
+lm_uac_partial <-  purrr::partial(lm,
+                                  formula = log(UAC) ~
+                                    term + BL_AGE + MEN + BMI +
+                                      PREVAL_DIAB.col_from_endpoints + SYSTM + BP_TREAT +
+                                      PREVAL_HFAIL_STRICT.col_from_endpoints + CURR_SMOKE +
+                                      PREVAL_AUTOIMMUN.col_from_endpoints)
+```
+
+```{r}
+cox_model_for_taxon <- function(df, term, fun, rank = NULL) {
+  stopifnot(!missing(df), !missing(term), !missing(fun))
+  message(term)
+  { if (is.null(rank)) df else df[[rank]] } %>%
+    dplyr::rename(term := {{term}}) %>% 
+    fun(data = .)
+}
+```
+
+# Alpha diversity
+
+## Univariate
+
+### Crea
+
+```{r}
+tse %>%
+  tse_meta(rownames = FALSE) %>%
+  lm(KREA_ENTS ~ shannon, data = .) %>% 
+  broom::tidy(conf.int = TRUE) %>%
+  round_numeric_columns() %>%
+  knitr::kable(caption = "Alpha diversity and Crea")
+```
+
+### UAC
+
+```{r}
+tse %>%
+  tse_meta(rownames = FALSE) %>%
+  dplyr::filter(!is.na(UAC)) %>% 
+  lm(log(UAC) ~ shannon, data = .) %>%
+  broom::tidy(conf.int = TRUE) %>%
+  round_numeric_columns() %>%
+  knitr::kable(caption = "Alpha diversity and UAC")
+```
+
+## Multivariate
+
+### Crea
+
+```{r}
+tse %>%
+  tse_meta(rownames = FALSE) %>%
+  lm(KREA_ENTS ~ shannon + BL_AGE + MEN + BMI +
+       PREVAL_DIAB.col_from_endpoints + SYSTM + BP_TREAT +
+       PREVAL_HFAIL_STRICT.col_from_endpoints + CURR_SMOKE +
+       PREVAL_AUTOIMMUN.col_from_endpoints, data = .) %>% 
+  broom::tidy(conf.int = TRUE) %>%
+  round_numeric_columns() %>% 
+  knitr::kable(caption = "Alpha diversity and Crea")
+```
+
+### UAC
+
+```{r}
+tse %>%
+  tse_meta(rownames = FALSE) %>%
+  dplyr::filter(!is.na(UAC)) %>% 
+  lm(UAC ~ shannon + BL_AGE + MEN + BMI +
+       PREVAL_DIAB.col_from_endpoints + SYSTM + BP_TREAT +
+       PREVAL_HFAIL_STRICT.col_from_endpoints + CURR_SMOKE +
+       PREVAL_AUTOIMMUN.col_from_endpoints, data = .) %>% 
+  broom::tidy(conf.int = TRUE) %>%
+  round_numeric_columns() %>% 
+  knitr::kable(caption = "Alpha diversity and UAC")
+```
+
+# Approximate microbial data dimensions
+
+```{r}
+pca <- tse %>%
+  tse_filter(EAST == 1) %>%
+  mia::subsetByPrevalentFeatures(detection = opts$detection, prevalence = opts$prevalence, as_relative = TRUE) %>% 
+  SummarizedExperiment::assay("relabundance") %>%
+  t %>%
+  tibble::as_tibble() %>%
+  prcomp()
+```
+
+```{r}
+n_independent_axes <- broom::tidy(pca, matrix = "eigenvalues") %>%
+  dplyr::filter(cumulative < 0.9) %>%
+  nrow %>%
+  add(1)
+```
+
+N:o axes `r n_independent_axes`.
+
+# Common taxa
+
+## East
+
+```{r}
+tse_species_east <- mia::subsetByPrevalentFeatures(x = tse %>% tse_filter(EAST == 1),
+                                              rank = "Species",
+                                              detection = opts$detection,
+                                              prevalence = opts$prevalence,
+                                              as_relative = TRUE)
+```
+
+```{r}
+df_east <- tse_species_east %>%
+  mia::transformAssay(method = "clr", pseudocount = 1) %>% 
+  mia::meltAssay(add_row_data = TRUE, assay_name = "clr") %>%
+  dplyr::mutate(FeatureID = glue::glue("GUT_{FeatureID}")) %>%
+  dplyr::mutate(FeatureID = stringr::str_replace_all(FeatureID, c(" " = "_", "-" = "_"))) %>% 
+  dplyr::select(SampleID, FeatureID, clr) %>%
+  tidyr::spread(FeatureID, clr) %>% 
+  dplyr::full_join(tse_meta(tse_species_east), by = dplyr::join_by(SampleID == rownames))
+```
+
+## West
+
+```{r}
+tse_species_west <- mia::subsetByPrevalentFeatures(x = tse %>% tse_filter(EAST == 0),
+                                                   rank = "Species",
+                                                   detection = 0,
+                                                   prevalence = 0,
+                                                   as_relative = TRUE)
+```
+
+```{r}
+df_west <- tse_species_west[rownames(tse_species_east), ] %>%
+  mia::transformAssay(method = "clr", pseudocount = 1) %>% 
+  mia::meltAssay(add_row_data = TRUE, assay_name = "clr") %>%
+  dplyr::mutate(FeatureID = glue::glue("GUT_{FeatureID}")) %>%
+  dplyr::mutate(FeatureID = stringr::str_replace_all(FeatureID, c(" " = "_", "-" = "_"))) %>% 
+  dplyr::select(SampleID, FeatureID, clr) %>%
+  tidyr::spread(FeatureID, clr) %>% 
+  dplyr::full_join(tse_meta(tse_species_west), by = dplyr::join_by(SampleID == rownames))
+```
+
+# Taxa level analyses
+
+## Check available taxa
+
+```{r}
+taxa_rank_list <- function(x, y) {
+  colnames(x) %>%
+    stringr::str_subset("GUT_") %>%
+    rlang::set_names() %>%
+    tibble::tibble(taxa = .)
+}
+```
+
+## Linear models
+
+### Crea
+
+```{r}
+df_lm_krea_east <- taxa_rank_list(df_east) %>% 
+  dplyr::mutate(results = purrr::map(taxa, ~cox_model_for_taxon(df = df_east,
+                                                                term = .x,
+                                                                fun = lm_krea_partial), .progress = TRUE)) %>% 
+  dplyr::mutate(results = purrr::map(results, ~broom::tidy(.x, conf.int = TRUE)))  %>%
+  tidyr::unnest(results) %>%
+  dplyr::filter(stringr::str_detect(term, "term")) %>%
+  dplyr::mutate(qval_my = my_adjust_p(p.value, n = n_independent_axes)) %>%
+  dplyr::mutate(qval_fdr = p.adjust(p.value, method = "BH"))
+```
+
+```{r}
+df_lm_krea_east %>% 
+  dplyr::arrange(p.value) %>%
+  dplyr::mutate_if(is.numeric, ~round(.x, digits = 4)) %>% 
+  DT::datatable(caption = "Per taxa Cox's models (minimum)")
+```
+
+### U-AlbKrea
+
+```{r}
+df_lm_uac_east <- taxa_rank_list(df_east) %>% 
+  dplyr::mutate(results = purrr::map(taxa, ~cox_model_for_taxon(df = df_east %>% dplyr::filter(!is.na(UAC)),
+                                                                term = .x,
+                                                                fun = lm_uac_partial), .progress = TRUE)) %>% 
+  dplyr::mutate(results = purrr::map(results, ~broom::tidy(.x, conf.int = TRUE)))  %>%
+  tidyr::unnest(results) %>%
+  dplyr::filter(stringr::str_detect(term, "term")) %>%
+  dplyr::mutate(qval_my = my_adjust_p(p.value, n = n_independent_axes)) %>%
+  dplyr::mutate(qval_fdr = p.adjust(p.value, method = "BH"))
+```
+
+```{r}
+df_lm_uac_east %>% 
+  dplyr::arrange(p.value) %>%
+  dplyr::mutate_if(is.numeric, ~round(.x, digits = 4)) %>% 
+  DT::datatable(caption = "Per taxa Cox's models (minimum)")
+```
+
+## Validation
+
+### Crea
+
+```{r}
+df_lm_krea_west <- df_lm_krea_east %>%
+  dplyr::filter(qval_my < 0.05) %>%
+  dplyr::select(taxa) %>%
+  dplyr::mutate(results = purrr::map(taxa, ~cox_model_for_taxon(df = df_west,
+                                                                term = .x,
+                                                                fun = lm_krea_partial), .progress = TRUE)) %>% 
+  dplyr::mutate(results = purrr::map(results, ~broom::tidy(.x, conf.int = TRUE)))  %>%
+  tidyr::unnest(results) %>%
+  { if ("term" %in% colnames(.)) . else tibble::add_column(., term = NA_character_, p.value = NA_real_) } %>% 
+  dplyr::filter(stringr::str_detect(term, "term")) %>%
+  dplyr::mutate(qval_my = my_adjust_p(p.value, n = dplyr::n())) %>%
+  dplyr::mutate(qval_fdr = p.adjust(p.value, method = "BH"))
+```
+
+```{r}
+dplyr::inner_join(df_lm_krea_east, df_lm_krea_west, by = dplyr::join_by(taxa, term), suffix = c("_east", "_west")) %>%
+  dplyr::select(contains("taxa"), contains("estimate"), contains("qval")) %>% 
+  dplyr::mutate_if(is.numeric, ~round(.x, digits = 4)) %>%
+  dplyr::arrange(qval_my_west) %>% 
+  DT::datatable()
+```
+
+### UAC
+
+```{r}
+df_lm_uac_west <- df_lm_uac_east %>%
+  dplyr::filter(qval_my < 0.05) %>%
+  dplyr::select(taxa) %>%
+  dplyr::mutate(results = purrr::map(taxa, ~cox_model_for_taxon(df = df_west %>% dplyr::filter(!is.na(UAC)),
+                                                                term = .x,
+                                                                fun = lm_uac_partial), .progress = TRUE)) %>% 
+  dplyr::mutate(results = purrr::map(results, ~broom::tidy(.x, conf.int = TRUE))) %>%
+  tidyr::unnest(results) %>%
+  { if ("term" %in% colnames(.)) . else tibble::add_column(., term = NA_character_, p.value = NA_real_) } %>% 
+  dplyr::filter(stringr::str_detect(term, "term")) %>% 
+  dplyr::mutate(qval_my = my_adjust_p(p.value, n = dplyr::n())) %>%
+  dplyr::mutate(qval_fdr = p.adjust(p.value, method = "BH"))
+```
+
+```{r}
+dplyr::inner_join(df_lm_uac_east, df_lm_uac_west, by = dplyr::join_by(taxa, term), suffix = c("_east", "_west")) %>%
+  dplyr::select(contains("taxa"), contains("estimate"), contains("qval")) %>% 
+  dplyr::mutate_if(is.numeric, ~round(.x, digits = 4)) %>% 
+  DT::datatable()
+```
+
+# Risk score
+
+```{r}
+taxa_for_glmnet <- df_lm_krea_east %>%
+  dplyr::filter(p.value < 0.05) %>%
+  dplyr::pull(taxa)
+```
+
+```{r}
+glmnet_x <- glue::glue("KREA_ENTS ~ 0 + BL_AGE + MEN + BMI +
+                                    PREVAL_DIAB.col_from_endpoints + SYSTM + BP_TREAT +
+                                    PREVAL_HFAIL_STRICT.col_from_endpoints + CURR_SMOKE +
+                                    PREVAL_AUTOIMMUN.col_from_endpoints +
+                                    {stringr::str_c(taxa_for_glmnet, collapse = ' + ')}") %>% 
+  { model.matrix(as.formula(.), df_east) }
+glmnet_y <- df_east %>% dplyr::pull(KREA_ENTS)
+```
+
+```{r}
+set.seed(20240305)
+cox_model <- glmnet::cv.glmnet(glmnet_x,
+                               glmnet_y,
+                               maxit=10**5,
+                               alpha = 1)
+```
+
+```{r}
+plot(cox_model)
+```
+
+
+## Implement risk score
+
+```{r}
+df_glmnet <- coef(cox_model, s = "lambda.min") %>%
+  as.data.frame.matrix() %>% 
+  tibble::as_tibble(rownames = "term") %>%
+  dplyr::filter(stringr::str_detect(term, "GUT_")) %>%
+  dplyr::mutate(value = round(s1, 2)) %>% 
+  dplyr::filter(abs(value) > 0) %>%
+  dplyr::select(term, value)
+```
+
+### Formula coefficients
+
+```{r}
+{ df_glmnet %>%
+    dplyr::mutate(term = stringr::str_replace_all(term, c("GUT_" = "", "_" = " "))) %>% 
+    ggplot2::ggplot(ggplot2::aes(x = term, y = value)) +
+    ggplot2::geom_bar(stat = "identity") +
+    ggplot2::scale_y_continuous(name = "Weight to risk score", expand = c(0, 0)) +
+    ggplot2::scale_x_discrete(name = NULL, expand = c(0, 0)) +
+    ggplot2::coord_flip() +
+    ggplot2::theme(legend.position = "none",
+                   panel.grid.major = ggplot2::element_blank(),
+                   panel.grid.minor = ggplot2::element_blank(),
+                   plot.margin = ggplot2::margin(1, 5, 1, 1, "mm")) } %>% 
+  mysave(name = "nephrobiota_risk_features", width = 10, height = 5)
+```
+
+### Risk formula
+
+```{r}
+fo <- df_glmnet %>%
+  dplyr::mutate(fo = glue::glue("({value}*{term})")) %>%
+  dplyr::pull(fo) %>%
+  stringr::str_c(collapse = "+")
+```
+
+```{r, results = "asis"}
+fo
+```
+
+
+### Models
+
+```{r}
+dfs_risk <- list()
+```
+
+#### Discovery
+
+```{r}
+( dfs_risk$train <- df_east %>% 
+    dplyr::mutate(risk := rlang::eval_tidy(rlang::parse_expr(fo))) %>% 
+    cox_model_for_taxon(term = "risk", fun = lm_krea_partial) %>% 
+    broom::tidy(conf.int = TRUE) ) %>%
+  round_numeric_columns() %>%
+  dplyr::mutate_if(is.numeric, ~round(.x, digits = 4)) %>% 
+  DT::datatable(caption = "Risk score full model")
+```
+
+#### Validation
+
+```{r}
+( dfs_risk$test <- df_west %>% 
+    dplyr::mutate(risk := rlang::eval_tidy(rlang::parse_expr(fo))) %>%
+    cox_model_for_taxon(term = "risk", fun = lm_krea_partial) %>% 
+    broom::tidy(conf.int = TRUE) ) %>%
+  round_numeric_columns() %>%
+  dplyr::mutate_if(is.numeric, ~round(.x, digits = 4)) %>% 
+  DT::datatable(caption = "Risk score full model")
+```
+
+### Combine results
+
+```{r}
+df_risk_plot <- vars %>%
+    tibble::enframe(value = "label") %>%
+    tidyr::unnest(label) %>%
+    tibble::add_row(name = "term", label = "Gut microbial risk score") %>%
+    dplyr::right_join(dplyr::bind_rows(dfs_risk, .id = "model") %>%
+                      dplyr::mutate(name = stringr::str_replace_all(term,
+                                                                    stringr::regex("[0-9]$"), "")),
+                      by = dplyr::join_by(name)) %>%
+    dplyr::filter(term != "(Intercept)")  
+```
+
+
+```{r}
+{ ggplot2::ggplot(df_risk_plot,
+                    ggplot2::aes(x = label, y = estimate, color = model)) +
+    ggplot2::geom_errorbar(ggplot2::aes(ymin = conf.low, ymax = conf.high),
+                           position = ggplot2::position_dodge(width = .5),
+                           width=0.4) +
+    ggplot2::geom_hline(yintercept = 0) +
+    ggplot2::geom_point(position = ggplot2::position_dodge(width = .5)) +
+    ggplot2::scale_color_grey(start = 0, end = 0.4) +
+    ggplot2::scale_y_continuous(name = NULL, expand = c(0, 0), limits = ~max(abs(.)+1) %>% c(-., .)) +
+    ggplot2::scale_x_discrete(name = NULL, expand = c(0, 0)) +
+    ggplot2::coord_flip() } %>%
+  mysave("nephrobiota_risk_score", width = 10, height = 4)  
+```

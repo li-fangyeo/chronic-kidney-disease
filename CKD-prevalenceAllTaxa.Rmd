@@ -1,0 +1,249 @@
+---
+title: "CKD-prevalenceTaxa"
+author: "Li-Fang Yeo"
+date: "2024-06-18"
+output: html_document
+---
+```{r setup, include=FALSE} 
+knitr::opts_chunk$set(warning = FALSE) 
+```
+```{r}
+library(magrittr)
+```
+```{r}
+devtools::load_all()
+```
+Command line arguments
+```{r}
+args <- list(
+  optparse::make_option("--east", action="store_true", default=FALSE, help="Exclude Eastern Finland subpopulation [default \"%default\"]"),
+  optparse::make_option("--west", action="store_true", default=FALSE, help="Exclude Eastern Finland subpopulation [default \"%default\"]"),
+  optparse::make_option("--low", action="store_true", default=FALSE, help="Exclude low GFR [default \"%default\"]"),
+  optparse::make_option("--high", action="store_true", default=FALSE, help="Exclude high GFR [default \"%default\"]"),
+  optparse::make_option("--detection", type = "numeric", default = 0.1/100, help = "Detection limit [default %default]"),
+optparse::make_option("--prevalence", type = "numeric", default = 1/100, help = "Prevalence limit [default %default]")) %>% 
+  optparse::OptionParser(option_list = .) %>%
+  optparse::parse_args()
+```
+```{r}
+args %>% tibble::enframe(name = "Option", value = "Argument") %>% DT::datatable()
+```
+Formatting options
+```{r}
+mysave <- mysavefactory()
+```
+```{r}
+{ ggthemes::theme_tufte(base_family = "sans", base_size = 12) +
+  ggplot2::theme(
+             panel.border = ggplot2::element_rect(colour = "black", fill = NA),
+             axis.text = ggplot2::element_text(colour = "black", size = 10),
+             aspect.ratio = 1) } %>%
+  ggplot2::theme_set()
+
+```
+Data definition
+```{r}
+vars <- list(BL_AGE = "Age",
+             MEN = "Men",
+             BMI = "BMI",
+             PREVAL_DIAB.col_from_endpoints = "Diabetes",
+             SYSTM = "Systolic blood pressure",
+             BP_TREAT = "Antihypertensive medication",
+             PREVAL_HFAIL_STRICT.col_from_endpoints = "Heart failure",
+             PREVAL_CKD = "Prevalent CKD",
+             INCIDENT_CKD = "Incident CKD",
+             CKD_AGEDIFF = "CKD Agediff",
+             CURR_SMOKE = "Smoking",
+             PREVAL_AUTOIMMUN.col_from_endpoints  = "Autoimmune disease",
+             KREA_ENTS = "Creatinine",
+             GFR = "Glomerulal filtration rate",
+             UAC = "Urine Albumin-Creatinine Ratio",
+             EAST = "Eastern Finland",
+             shannon = "Shannon diversity")
+```
+Read data in, calculate GFR, UAC and remove NAs
+```{r}
+tse <- readRDS("data/tse_gg2_MGS_FR02.rds") %>%
+  mia::transformAssay(assay.type = "counts", method = "relabundance") %>% 
+  mia::addAlpha(assay.type = "counts", index = "shannon", name = "shannon") %>%
+  tse_mutate(dplyr::across(c(MEN,
+                             EAST,
+                             BP_TREAT,
+                             CURR_SMOKE,
+                             dplyr::contains("INCIDENT"),
+                             dplyr::contains("PREVAL")), as.factor)) %>% 
+  tse_mutate(GFR = 0.993^round(BL_AGE) *
+               dplyr::case_when(MEN == 0 & KREA_ENTS <= 62 ~ 144*(KREA_ENTS/61.9)^-0.329,
+                                MEN == 0 & KREA_ENTS >  62 ~ 144*(KREA_ENTS/61.9)^-1.209,
+                                MEN == 1 & KREA_ENTS <= 80 ~ 141*(KREA_ENTS/79.6)^-0.411,
+                                MEN == 1 & KREA_ENTS >  80 ~ 141*(KREA_ENTS/79.6)^-1.209)) %>%
+  tse_mutate(UAC = U_ALB/U_KREA) %>% 
+  tse_filter(GRAVID %in% c(1, NA), BL_USE_RX_J01_1mo %in% c(0, NA)) %>%
+  { if (args$low) tse_filter(., GFR >= 60) else . } %>%
+  { if (args$high) tse_filter(., GFR < 60) else . } %>% 
+  { if (args$east) tse_filter(., EAST == 0) else . } %>% 
+  { if (args$west) tse_filter(., EAST == 1) else . } %>% 
+  tse_filter(dplyr::if_all(dplyr::one_of(names(vars) %difference% "UAC"), not_na)) %>%
+  tse_select(names(vars))
+```
+# Characteristic
+```{r}
+tse %>%
+  tse_meta(rownames = FALSE) %>%
+  mytableone(vars)
+```
+GFR model + covariates
+```{r}
+lm_gfr_partial <-  purrr::partial(lm,
+                                  formula = GFR ~
+                                    term + BL_AGE + MEN + BMI +
+                                    PREVAL_DIAB.col_from_endpoints + SYSTM + BP_TREAT +
+                                    PREVAL_HFAIL_STRICT.col_from_endpoints + CURR_SMOKE +
+                                    PREVAL_AUTOIMMUN.col_from_endpoints)
+```
+```{r}
+lm_gfr_model_for_taxon <- function(df, term, rank = NULL) {
+  message(term)
+  { if (is.null(rank)) df else df[[rank]] } %>%
+    dplyr::rename(term := {{term}}) %>% 
+    lm_gfr_partial(data = .)
+}
+```
+log(UAC) model + covariates
+```{r}
+lm_uac_partial <-  purrr::partial(lm,
+                                  formula = log(UAC) ~
+                                    term + BL_AGE + MEN + BMI +
+                                    PREVAL_DIAB.col_from_endpoints + SYSTM + BP_TREAT +
+                                    PREVAL_HFAIL_STRICT.col_from_endpoints + CURR_SMOKE +
+                                    PREVAL_AUTOIMMUN.col_from_endpoints)
+```
+```{r}
+lm_uac_model_for_taxon <- function(df, term, rank = NULL) {
+  message(term)
+  { if (is.null(rank)) df else df[[rank]] } %>%
+    dplyr::rename(term := {{term}}) %>% 
+    lm_uac_partial(data = .)
+}
+```
+Creatine model + covariates
+```{r}
+lm_crea_partial <-  purrr::partial(lm,
+                                  formula = KREA_ENTS ~
+                                    term + BL_AGE + MEN + BMI +
+                                    PREVAL_DIAB.col_from_endpoints + SYSTM + BP_TREAT +
+                                    PREVAL_HFAIL_STRICT.col_from_endpoints + CURR_SMOKE +
+                                    PREVAL_AUTOIMMUN.col_from_endpoints)
+```
+```{r}
+lm_crea_model_for_taxon <- function(df, term, rank = NULL) {
+  message(term)
+  { if (is.null(rank)) df else df[[rank]] } %>%
+    dplyr::rename(term := {{term}}) %>% 
+    lm_crea_partial(data = .)
+}
+```
+# Taxa level analyses at ALL levels
+#Common taxa
+Agglomerate prevalent features
+```{r}
+subset_features_partial <-  purrr::partial(mia::subsetByPrevalentFeatures,
+                                           x = tse,
+                                           detection = args$detection,
+                                           prevalence = args$prevalence,
+                                           as_relative = TRUE) %>%
+  purrr::possibly()
+```
+Subset to only Family
+```{r}
+taxa_subsets <- c("Genus") %>%
+  rlang::set_names() %>%
+  purrr::map(subset_features_partial)
+```
+Melt tse to data frame
+```{r}
+melt_tse <- function(x, method = "clr") {
+  mia::transformAssay(x, method = method, pseudocount = 1) %>% 
+    mia::meltAssay(add_row_data = TRUE, assay_name = method) %>%
+    dplyr::mutate(FeatureID = glue::glue("GUT_{FeatureID}")) %>%
+    dplyr::mutate(FeatureID = stringr::str_replace_all(FeatureID, c(" " = "_", "-" = "_"))) %>% 
+    dplyr::select(SampleID, FeatureID, clr) %>%
+    tidyr::spread(FeatureID, clr) %>% 
+    dplyr::full_join(tse_meta(x), by = dplyr::join_by(SampleID == rownames))
+}
+```
+```{r}
+dfs <- taxa_subsets %>%
+  purrr::map(melt_tse, .progress = TRUE)
+```
+# Taxa level analyses
+generate a list of taxa, add the word GUT in front of the taxa
+```{r}
+taxa_rank_list <- function(x, y) {
+  list_names <- colnames(x) %>%
+    stringr::str_subset("GUT_") %>%
+    rlang::set_names()
+}
+```
+```{r}
+taxa_rank_list <- dfs %>%
+  purrr::imap(taxa_rank_list, .progress = TRUE)
+```
+## GFR
+From the taxa list, add rank, and generate linear model for each taxa, adjust for FDR using PC method and BH
+```{r, message=FALSE}
+df_lm_gfr_results <- taxa_rank_list %>%
+  purrr::map_df(~tibble::tibble(taxa = .x), .id = "rank") %>% 
+  tidyr::gather(rank, taxa) %>%
+  dplyr::mutate(results = purrr::map2(rank, taxa, ~lm_gfr_model_for_taxon(df = dfs, term = .y, rank = .x))) %>%
+  dplyr::mutate(results = purrr::map(results, ~broom::tidy(.x, conf.int = TRUE)))  %>%
+  tidyr::unnest(results) %>%
+  dplyr::filter(stringr::str_detect(term, "term")) %>%
+  #dplyr::mutate(qval_my = my_adjust_p(p.value, n = n_independent_axes)) %>%
+  dplyr::mutate(qval_fdr = p.adjust(p.value, method = "BH"))
+```
+Results
+```{r}
+df_lm_gfr_results %>%
+  dplyr::arrange(p.value) %>% 
+  dplyr::filter(qval_fdr < 0.05) %>%
+  DT::datatable(caption = "Linear model for GFR")
+```
+U-AlbKrea 
+(Urine albumine creatine ratio)
+```{r, message= FALSE}
+df_lm_uac_results <- taxa_rank_list %>%
+  purrr::map_df(~tibble::tibble(taxa = .x), .id = "rank") %>% 
+  tidyr::gather(rank, taxa) %>%
+  dplyr::mutate(results = purrr::map2(rank, taxa, ~lm_uac_model_for_taxon(df = dfs, term = .y, rank = .x))) %>%
+  dplyr::mutate(results = purrr::map(results, ~broom::tidy(.x, conf.int = TRUE)))  %>%
+  tidyr::unnest(results) %>%
+  dplyr::filter(stringr::str_detect(term, "term")) %>%
+  #dplyr::mutate(qval_my = my_adjust_p(p.value, n = n_independent_axes)) %>%
+  dplyr::mutate(qval_fdr = p.adjust(p.value, method = "BH"))
+```
+```{r}
+df_lm_uac_results %>%
+  dplyr::arrange(p.value) %>% 
+  dplyr::filter(qval_fdr < 0.05) %>%
+  DT::datatable(caption = "Linear model for UAC")
+```
+Crea
+ (serum creatine levels)
+```{r,message=FALSE}
+df_lm_crea_results <- taxa_rank_list %>%
+  purrr::map_df(~tibble::tibble(taxa = .x), .id = "rank") %>% 
+  tidyr::gather(rank, taxa) %>%
+  dplyr::mutate(results = purrr::map2(rank, taxa, ~lm_crea_model_for_taxon(df = dfs, term = .y, rank = .x))) %>%
+  dplyr::mutate(results = purrr::map(results, ~broom::tidy(.x, conf.int = TRUE)))  %>%
+  tidyr::unnest(results) %>%
+  dplyr::filter(stringr::str_detect(term, "term")) %>%
+  # dplyr::mutate(qval_my = my_adjust_p(p.value, n = n_independent_axes)) %>%
+  dplyr::mutate(qval_fdr = p.adjust(p.value, method = "BH"))
+```
+```{r}
+df_lm_crea_results %>%
+  dplyr::arrange(p.value) %>% 
+  dplyr::filter(qval_fdr < 0.05) %>%
+  DT::datatable(caption = "Linear model for Serum Creatinine")
+```

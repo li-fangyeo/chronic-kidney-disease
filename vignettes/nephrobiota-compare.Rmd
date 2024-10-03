@@ -1,0 +1,99 @@
+---
+title: "Compare nephro-metagenomics results in FINRISK 2002"
+author: "Joonatan Palmu"
+date: "`r format(Sys.time(), '%d.%m.%Y')`"
+output:
+  rmdformats::html_clean:
+    self_contained: true
+    thumbnails: false
+    lightbox: true
+    gallery: true
+---
+
+# Setup
+
+```{css, echo = FALSE}
+.main-container {
+  max-width:1920px !important;
+}
+```
+
+```{r libraries}
+library(magrittr)
+```
+
+```{r load functions}
+devtools::load_all()
+```
+
+## Command line arguments
+
+```{r}
+args <- list(
+  optparse::make_option("--east",
+                        type = "character",
+                        help="East excluded file [default \"%default\"]",
+                        default = "rds/nephrobiota-prevalent-krea_E=TRUE_W=FALSE_L=FALSE_H=FALSE-20240305_142327.rds"),
+  optparse::make_option("--west",
+                        type = "character",
+                        help="West excluded file [default \"%default\"]",
+                        default = "rds/nephrobiota-prevalent-krea_E=FALSE_W=TRUE_L=FALSE_H=FALSE-20240305_142329.rds")) %>% 
+  optparse::OptionParser(option_list = .) %>%
+  optparse::parse_args()
+```
+
+```{r}
+args %>% tibble::enframe(name = "Option", value = "Argument") %>% DT::datatable()
+```
+
+## Formatting options
+
+```{r options, echo = FALSE}
+knitr::opts_chunk$set(include = TRUE, echo = TRUE, message = FALSE, results='asis', cache=FALSE, warning=FALSE, error = TRUE)
+```
+
+```{r define ggplot settings}
+mysave <- mysavefactory()
+```
+
+```{r}
+{ ggthemes::theme_tufte(base_family = "sans", base_size = 12) +
+  ggplot2::theme(
+             panel.border = ggplot2::element_rect(colour = "black", fill = NA),
+             axis.text = ggplot2::element_text(colour = "black", size = 10),
+             aspect.ratio = 1) } %>%
+  ggplot2::theme_set()
+```
+
+# Read data
+
+```{r}
+df_east <- readRDS(args$west)
+df_west <- readRDS(args$east)
+```
+
+## Main results
+
+```{r}
+n_tests <- df_east %>%
+  dplyr::filter(qval_my < 0.05) %>%
+  nrow()
+```
+
+```{r}
+dplyr::full_join(df_west, df_east, by = dplyr::join_by(taxa), suffix = c("_west", "_east")) %>%
+  dplyr::filter(qval_my_east < 0.05, p.value_west < 0.05/n_tests) %>%
+  dplyr::select(taxa, contains("estimate"), qval_my_east, p.value_west) %>%
+  dplyr::mutate_if(is.numeric, ~round(., 4)) %>% 
+  DT::datatable()
+```
+
+## All results
+
+```{r}
+dplyr::full_join(df_west, df_east, by = dplyr::join_by(taxa), suffix = c("_west", "_east")) %>%
+  dplyr::filter(qval_my_east < 0.05) %>%
+  dplyr::select(taxa, contains("estimate"), qval_my_east, p.value_west) %>%
+  dplyr::mutate_if(is.numeric, ~round(., 4)) %>% 
+  DT::datatable()
+```
