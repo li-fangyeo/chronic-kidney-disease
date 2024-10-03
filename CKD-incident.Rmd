@@ -1,0 +1,353 @@
+---
+title: "Gut microbiom Chronic Kidney Disease Incident"
+author: "Joonatan Palmu, Li-Fang Yeo"
+date: "17th Sept 2024"
+output:
+  html_document: default
+  pdf_document: default
+---
+```{r setup, include=FALSE} 
+knitr::opts_chunk$set(warning = FALSE) 
+```
+```{r}
+library(magrittr)
+devtools::load_all()
+```
+
+```{r}
+#Arguments
+#makes it easier to run scripts (.sh) applicable when using emacs
+args <- list(
+  optparse::make_option("--east", action="store_true", default=FALSE, help="Exclude Eastern Finland subpopulation [default \"%default\"]"),
+  optparse::make_option("--west", action="store_true", default=FALSE, help="Exclude Eastern Finland subpopulation [default \"%default\"]"),
+  optparse::make_option("--detection", type = "numeric", default = 0.1/100, help = "Detection limit [default %default]"),
+  optparse::make_option("--prevalence", type = "numeric", default = 1/100, help = "Prevalence limit [default %default]")) %>% 
+  optparse::OptionParser(option_list = .) %>%
+  optparse::parse_args()
+
+args %>% tibble::enframe(name = "Option", value = "Argument") %>% DT::datatable()
+```
+Formatting
+```{r}
+#Formatting how outputs are saved
+myggsave <- myggsavefactory()
+
+#Formatting image outputs
+{ ggthemes::theme_tufte(base_family = "sans", base_size = 12) +
+    ggplot2::theme(
+      panel.border = ggplot2::element_rect(colour = "black", fill = NA),
+      axis.text = ggplot2::element_text(colour = "black", size = 10),
+      aspect.ratio = 1) } %>%
+  ggplot2::theme_set()
+```
+Data definition
+```{r}
+vars <- list(BL_AGE = "Age",
+             MEN = "Men",
+             BMI = "BMI",
+             PREVAL_DIAB.col_from_endpoints = "Diabetes",
+             SYSTM = "Systolic blood pressure",
+             BP_TREAT = "Antihypertensive medication",
+             PREVAL_HFAIL_STRICT.col_from_endpoints = "Heart failure",
+             PREVAL_CKD = "Prevalent CKD",
+             INCIDENT_CKD = "Incident CKD",
+             CKD_AGEDIFF = "CKD Agediff",
+             CURR_SMOKE = "Smoking",
+             PREVAL_AUTOIMMUN.col_from_endpoints = "Autoimmune disease",
+             KREA_ENTS = "Creatinine",
+             GFR = "Glomerulal filtration rate",
+             UAC = "Urine Albumin-Creatinine Ratio",
+             EAST = "Eastern Finland",
+             shannon = "Shannon diversity") 
+```
+Read in data, calculate alpha, tidy data for selected variables
+```{r}
+tse <- readRDS("data/tse_gg2_MGS_FR02.rds") %>%
+  mia::transformAssay(assay.type = "counts", method = "relabundance") %>% 
+  mia::addAlpha(assay.type = "counts", index = "shannon", name = "shannon") %>%
+  tse_mutate(dplyr::across(c(MEN,
+                             EAST,
+                             BP_TREAT,
+                             CURR_SMOKE,
+                             dplyr::contains("INCIDENT"),
+                             dplyr::contains("PREVAL")), as.factor)) %>% 
+  tse_mutate(GFR = 0.993^round(BL_AGE) *
+               dplyr::case_when(MEN == 0 & KREA_ENTS <= 62 ~ 144*(KREA_ENTS/61.9)^-0.329,
+                                MEN == 0 & KREA_ENTS >  62 ~ 144*(KREA_ENTS/61.9)^-1.209,
+                                MEN == 1 & KREA_ENTS <= 80 ~ 141*(KREA_ENTS/79.6)^-0.411,
+                                MEN == 1 & KREA_ENTS >  80 ~ 141*(KREA_ENTS/79.6)^-1.209)) %>%
+  tse_mutate(UAC = U_ALB/U_KREA) %>% 
+  tse_filter(GRAVID %in% c(1, NA), BL_USE_RX_J01_1mo %in% c(0, NA)) %>% 
+  tse_filter(GFR >= 60, PREVAL_CKD == 0, UAC <=3 | is.na(UAC)) %>%
+  { if (args$east) tse_filter(., EAST == 0) else . } %>% 
+  { if (args$west) tse_filter(., EAST == 1) else . } %>% 
+  tse_filter(dplyr::if_all(dplyr::one_of(names(vars) %difference% "UAC"), not_na)) %>%
+  tse_select(names(vars))
+```
+Table one / characteristics of data
+```{r}
+tse %>%
+  tse_meta(rownames = FALSE) %>%
+  dplyr::mutate(INCIDENT_CKD = factor(ifelse(INCIDENT_CKD == 1, "Incident CKD" , "No CKD"))) %>%
+  mytableone(vars,fo =  ~ .| INCIDENT_CKD )
+```
+Function use to define coxph model with all covariates
+```{r}
+coxph_full_partial <-  purrr::partial(survival::coxph,
+                                      formula = my_surv(CKD_AGEDIFF, INCIDENT_CKD) ~
+                                      term + BL_AGE + MEN + BMI +
+                                      PREVAL_DIAB.col_from_endpoints + SYSTM + BP_TREAT +
+                                      PREVAL_HFAIL_STRICT.col_from_endpoints + CURR_SMOKE +
+                                      PREVAL_AUTOIMMUN.col_from_endpoints + KREA_ENTS,
+                                      ties = "breslow")
+
+```
+Function for cox model with minimum covariates (age + sex)
+```{r}
+coxph_minimum_partial <-  purrr::partial(survival::coxph,
+                                         formula = my_surv(CKD_AGEDIFF, INCIDENT_CKD) ~
+                                           term + BL_AGE + MEN,
+                                         ties = "breslow")
+```
+Function formating for missing variables
+```{r}
+cox_model_for_taxon <- function(df, term, fun, rank = NULL) {
+  stopifnot(!missing(df), !missing(term), !missing(fun))
+  message(term)
+  { if (is.null(rank)) df else df[[rank]] } %>%
+    dplyr::rename(term := {{term}}) %>% 
+    fun(data = .)
+}
+```
+# ALPHA DIVERSITY
+Using alpha diversity to predict incidence of CKD, adjusting only for sex and age
+```{r}
+tse %>%
+  tse_meta(rownames = FALSE) %>% 
+  cox_model_for_taxon(term = "shannon", fun = coxph_minimum_partial) %>% 
+  broom::tidy(exponentiate = TRUE, conf.int = TRUE) %>%
+  round_numeric_columns() %>%
+  dplyr::mutate_if(is.numeric, ~round(.x, digits = 4)) %>% 
+  DT::datatable(caption = "Alpha diversity")
+```
+Using alpha diversity to predict incidence of CKD, adjusting for all covariates 
+```{r}
+tse %>%
+  tse_meta(rownames = FALSE) %>%
+  cox_model_for_taxon(term = "shannon", fun = coxph_full_partial) %>% 
+  broom::tidy(exponentiate = TRUE, conf.int = TRUE) %>%
+  round_numeric_columns() %>%
+  dplyr::mutate_if(is.numeric, ~round(.x, digits = 4)) %>% 
+  #DT::datatable(caption = "Alpha diversity")
+  write.csv("cox-CKD.csv")
+```
+
+Common Taxa
+```{r}
+#Agglomerate prevalent features
+subset_features_partial <-  purrr::partial(mia::subsetByPrevalentFeatures,
+                                           x = tse,
+                                           detection = args$detection,
+                                           prevalence = args$prevalence,
+                                           as_relative = TRUE) %>%
+  purrr::possibly()
+```
+
+```{r}
+taxa_subsets <- c("Species") %>%
+  rlang::set_names() %>%
+  purrr::map(subset_features_partial)
+```
+
+```{r}
+taxa_subsets %>%
+  purrr::map_df(~mia::getPrevalence(.x, detection = args$detection, as_relative = TRUE), .id = "rank") %>%
+  tidyr::gather(Taxa, Abundance, -rank) %>%
+  dplyr::arrange(Abundance) %>%
+  dplyr::mutate_if(is.numeric, ~round(.x, digits = 4)) %>% 
+  DT::datatable(caption = "Gut microbial relative abundances at 0.1% detection threshold, in 1% of all samples")
+```
+Melt TSE to data frame
+```{r}
+melt_tse <- function(x, method = "clr") {
+  mia::transformAssay(x, method = method, pseudocount = 1) %>% 
+    mia::meltAssay(add_row_data = TRUE, assay_name = method) %>%
+    dplyr::mutate(FeatureID = glue::glue("GUT_{FeatureID}")) %>%
+    dplyr::mutate(FeatureID = stringr::str_replace_all(FeatureID, c(" " = "_", "-" = "_"))) %>% 
+    dplyr::select(SampleID, FeatureID, clr) %>%
+    tidyr::spread(FeatureID, clr) %>% 
+    dplyr::full_join(tse_meta(x), by = dplyr::join_by(SampleID == rownames))
+}
+```
+```{r}
+dfs <- taxa_subsets %>%
+  purrr::map(melt_tse, .progress = TRUE)
+```
+Cox's model
+```{r}
+#Check available taxa
+taxa_rank_list <- function(x, y) {
+  list_names <- colnames(x) %>%
+    stringr::str_subset("GUT_") %>%
+    rlang::set_names()
+}
+```
+```{r}
+taxa_rank_list <- dfs %>%
+  purrr::imap(taxa_rank_list, .progress = TRUE)
+```
+
+# Cox's model
+Minimum (adjusted for age and sex)
+```{r, message=FALSE}
+taxa_rank_list %>%
+  purrr::map_df(~tibble::tibble(taxa = .x), .id = "rank") %>% 
+  tidyr::gather(rank, taxa) %>%
+  dplyr::mutate(results = purrr::map2(rank, taxa, ~cox_model_for_taxon(df = dfs,
+                                                                       term = .y,
+                                                                       rank = .x,
+                                                                       fun = coxph_minimum_partial), .progress = TRUE)) %>% 
+  dplyr::mutate(results = purrr::map(results, ~broom::tidy(.x, exponentiate = TRUE, conf.int = TRUE)))  %>%
+  tidyr::unnest(results) %>%
+  dplyr::filter(stringr::str_detect(term, "term")) %>%
+  dplyr::mutate(qval_fdr = p.adjust(p.value, method = "BH")) %>%
+  dplyr::arrange(p.value) %>%
+  dplyr::mutate_if(is.numeric, ~round(.x, digits = 4)) %>% 
+  DT::datatable(caption = "Per taxa Cox's models (minimum)")
+
+```
+Full (all covariates)
+```{r, message= FALSE}
+taxa_rank_list %>%
+  purrr::map_df(~tibble::tibble(taxa = .x), .id = "rank") %>% 
+  tidyr::gather(rank, taxa) %>%
+  dplyr::mutate(results = purrr::map2(rank, taxa, ~cox_model_for_taxon(df = dfs,
+                                                                       term = .y,
+                                                                       rank = .x,
+                                                                       fun = coxph_full_partial), .progress = TRUE)) %>% 
+  dplyr::mutate(results = purrr::map(results, ~broom::tidy(.x, exponentiate = TRUE, conf.int = TRUE)))  %>%
+  tidyr::unnest(results) %>%
+  dplyr::filter(stringr::str_detect(term, "term")) %>%
+  dplyr::mutate(qval_fdr = p.adjust(p.value, method = "BH")) %>%
+  dplyr::arrange(p.value) %>%
+  dplyr::mutate_if(is.numeric, ~round(.x, digits = 4)) %>% 
+  DT::datatable(caption = "Per taxa Cox's models (full)")
+ 
+```
+# Cox model by Genus
+Common Taxa
+```{r}
+#Agglomerate prevalent features
+subset_features_partial <-  purrr::partial(mia::subsetByPrevalentFeatures,
+                                           x = tse,
+                                           detection = args$detection,
+                                           prevalence = args$prevalence,
+                                           as_relative = TRUE) %>%
+  purrr::possibly()
+```
+
+```{r}
+taxa_subsets <- c("Genus") %>%
+  rlang::set_names() %>%
+  purrr::map(subset_features_partial)
+```
+
+```{r}
+taxa_subsets %>%
+  purrr::map_df(~mia::getPrevalence(.x, detection = args$detection, as_relative = TRUE), .id = "rank") %>%
+  tidyr::gather(Taxa, Abundance, -rank) %>%
+  dplyr::arrange(Abundance) %>%
+  dplyr::mutate_if(is.numeric, ~round(.x, digits = 4)) %>% 
+  DT::datatable(caption = "Gut microbial relative abundances at 0.1% detection threshold, in 1% of all samples")
+```
+Melt TSE to data frame
+```{r}
+melt_tse <- function(x, method = "clr") {
+  mia::transformAssay(x, method = method, pseudocount = 1) %>% 
+    mia::meltAssay(add_row_data = TRUE, assay_name = method) %>%
+    dplyr::mutate(FeatureID = glue::glue("GUT_{FeatureID}")) %>%
+    dplyr::mutate(FeatureID = stringr::str_replace_all(FeatureID, c(" " = "_", "-" = "_"))) %>% 
+    dplyr::select(SampleID, FeatureID, clr) %>%
+    tidyr::spread(FeatureID, clr) %>% 
+    dplyr::full_join(tse_meta(x), by = dplyr::join_by(SampleID == rownames))
+}
+```
+```{r}
+dfs <- taxa_subsets %>%
+  purrr::map(melt_tse, .progress = TRUE)
+```
+Cox's model
+```{r}
+#Check available taxa
+taxa_rank_list <- function(x, y) {
+  list_names <- colnames(x) %>%
+    stringr::str_subset("GUT_") %>%
+    rlang::set_names()
+}
+```
+```{r}
+taxa_rank_list <- dfs %>%
+  purrr::imap(taxa_rank_list, .progress = TRUE)
+```
+
+# Cox's model
+Minimum (adjusted for age and sex)
+```{r, message=FALSE}
+taxa_rank_list %>%
+  purrr::map_df(~tibble::tibble(taxa = .x), .id = "rank") %>% 
+  tidyr::gather(rank, taxa) %>%
+  dplyr::mutate(results = purrr::map2(rank, taxa, ~cox_model_for_taxon(df = dfs,
+                                                                       term = .y,
+                                                                       rank = .x,
+                                                                       fun = coxph_minimum_partial), .progress = TRUE)) %>% 
+  dplyr::mutate(results = purrr::map(results, ~broom::tidy(.x, exponentiate = TRUE, conf.int = TRUE)))  %>%
+  tidyr::unnest(results) %>%
+  dplyr::filter(stringr::str_detect(term, "term")) %>%
+  dplyr::mutate(qval_fdr = p.adjust(p.value, method = "BH")) %>%
+  dplyr::arrange(p.value) %>%
+  dplyr::mutate_if(is.numeric, ~round(.x, digits = 4)) %>% 
+  DT::datatable(caption = "Per taxa Cox's models (minimum)")
+```
+Full (all covariates)
+```{r, message= FALSE}
+taxa_rank_list %>%
+  purrr::map_df(~tibble::tibble(taxa = .x), .id = "rank") %>% 
+  tidyr::gather(rank, taxa) %>%
+  dplyr::mutate(results = purrr::map2(rank, taxa, ~cox_model_for_taxon(df = dfs,
+                                                                       term = .y,
+                                                                       rank = .x,
+                                                                       fun = coxph_full_partial), .progress = TRUE)) %>% 
+  dplyr::mutate(results = purrr::map(results, ~broom::tidy(.x, exponentiate = TRUE, conf.int = TRUE)))  %>%
+  tidyr::unnest(results) %>%
+  dplyr::filter(stringr::str_detect(term, "term")) %>%
+  dplyr::mutate(qval_fdr = p.adjust(p.value, method = "BH")) %>%
+  dplyr::arrange(p.value) %>%
+  dplyr::mutate_if(is.numeric, ~round(.x, digits = 4)) %>% 
+  DT::datatable(caption = "Per taxa Cox's models (full)")
+```
+# Beta diversity
+Calculate RDA using Bray-curtis at the species level with only age and sex covariates
+```{r}
+#beta_ckd_full <- tse %>%  mia::agglomerateByRank(rank = "Species") %>% 
+  #  mia::transformAssay(method = "relabundance") %>%
+  #  mia::runRDA(assay.type = "relabundance",
+   #             formula = assay ~ BL_AGE + MEN + BMI +
+    #                                  PREVAL_DIAB.col_from_endpoints + SYSTM + BP_TREAT +
+     #                                 PREVAL_HFAIL_STRICT.col_from_endpoints + CURR_SMOKE +
+      #                                PREVAL_AUTOIMMUN.col_from_endpoints + KREA_ENTS + INCIDENT_CKD,
+       #         distance = "bray",
+        #        na.action = na.exclude)
+```
+```{r}
+#rda_info <- attr(SingleCellExperiment::reducedDim(beta_ckd_full, "RDA"), "significance")
+
+```
+```{r}
+#rda_info$permanova %>%
+  #knitr::kable() #%>%
+  #write.csv("./permanova/permanova-ckd.csv")
+#rda_info$homogeneity %>%
+  #knitr::kable() #%>%
+  #write.csv("./permanova/homogeneity-ckd.csv")
+
+```
