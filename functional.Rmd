@@ -1,37 +1,29 @@
 ---
-title: "Functional shit for CKD"
+title: "Functional Incident CKD"
 author: "LF Yeo"
-date: "2024-09-25"
+date: "2024-10-07"
 output: html_document
 ---
 
 ```{r setup, include=FALSE} 
-knitr::opts_chunk$set(warning = FALSE) 
+knitr::opts_chunk$set(warning = FALSE, message=FALSE) 
 ```
 ```{r}
 library(magrittr)
-```
-```{r}
+library(RNOmni)
+library(dplyr)
+library(readr)
+library(mia)
 devtools::load_all()
 ```
-Command line arguments
+Importing files
 ```{r}
-args <- list(
-  optparse::make_option("--east", action="store_true", default=FALSE, help="Exclude Eastern Finland subpopulation [default \"%default\"]"),
-  optparse::make_option("--west", action="store_true", default=FALSE, help="Exclude Eastern Finland subpopulation [default \"%default\"]"),
-  optparse::make_option("--low", action="store_true", default=FALSE, help="Exclude low GFR [default \"%default\"]"),
-  optparse::make_option("--high", action="store_true", default=FALSE, help="Exclude high GFR [default \"%default\"]"),
-  optparse::make_option("--detection", type = "numeric", default = 0.1/100, help = "Detection limit [default %default]"),
-optparse::make_option("--prevalence", type = "numeric", default = 1/100, help = "Prevalence limit [default %default]")) %>% 
-  optparse::OptionParser(option_list = .) %>%
-  optparse::parse_args()
+#Functional pathways from metaCyc
+joined_pathabundance <- read_delim("joined_pathabundance.tsv", 
+                                   delim = "\t", escape_double = FALSE, trim_ws = TRUE)
 ```
 ```{r}
-args %>% tibble::enframe(name = "Option", value = "Argument") %>% DT::datatable()
-```
-Data definition
-
-```{r}
+#Defining covariates for the model
 vars <- list(BL_AGE = "Age",
              MEN = "Men",
              BMI = "BMI",
@@ -43,17 +35,14 @@ vars <- list(BL_AGE = "Age",
              INCIDENT_CKD = "Incident CKD",
              CKD_AGEDIFF = "CKD Agediff",
              CURR_SMOKE = "Smoking",
-             PREVAL_AUTOIMMUN.col_from_endpoints  = "Autoimmune disease",
+             PREVAL_AUTOIMMUN.col_from_endpoints = "Autoimmune disease",
              KREA_ENTS = "Creatinine",
              GFR = "Glomerulal filtration rate",
              UAC = "Urine Albumin-Creatinine Ratio",
-             EAST = "Eastern Finland")
-```
-Read data in, calculate GFR, UAC and remove NAs
-```{r}
-tse <- readRDS("data/tse_h3_functional.rds") %>%
-  #mia::transformAssay(assay.type = "counts", method = "relabundance") %>% 
-  #mia::addAlpha(assay.type = "counts", index = "shannon", name = "shannon") %>%
+             EAST = "Eastern Finland") 
+
+#Importing metadata and cleaning up
+tse <- readRDS("data/tse_gg2_MGS_FR02.rds") %>%
   tse_mutate(dplyr::across(c(MEN,
                              EAST,
                              BP_TREAT,
@@ -66,82 +55,151 @@ tse <- readRDS("data/tse_h3_functional.rds") %>%
                                 MEN == 1 & KREA_ENTS <= 80 ~ 141*(KREA_ENTS/79.6)^-0.411,
                                 MEN == 1 & KREA_ENTS >  80 ~ 141*(KREA_ENTS/79.6)^-1.209)) %>%
   tse_mutate(UAC = U_ALB/U_KREA) %>% 
-  tse_filter(GRAVID %in% c(1, NA), BL_USE_RX_J01_1mo %in% c(0, NA)) %>%
-  { if (args$low) tse_filter(., GFR >= 60) else . } %>%
-  { if (args$high) tse_filter(., GFR < 60) else . } %>% 
-  { if (args$east) tse_filter(., EAST == 0) else . } %>% 
-  { if (args$west) tse_filter(., EAST == 1) else . } %>% 
+  tse_filter(GRAVID %in% c(1, NA), BL_USE_RX_J01_1mo %in% c(0, NA)) %>% 
+  tse_filter(GFR >= 60, PREVAL_CKD == 0, UAC <=3 | is.na(UAC)) %>%
   tse_filter(dplyr::if_all(dplyr::one_of(names(vars) %difference% "UAC"), not_na)) %>%
   tse_select(names(vars))
 ```
-# Characteristic
+Data wrangling and cleaning up
 ```{r}
-tse %>%
-  tse_meta(rownames = FALSE) %>%
-  dplyr::mutate(INCIDENT_CKD = factor(ifelse(INCIDENT_CKD == 1, "Incident CKD" , "No CKD"))) %>%
-  mytableone(vars )
-```
-# Model function definitions
-GFR model + covariates
-```{r}
-lm_gfr_partial <-  purrr::partial(lm,
-                                  formula = GFR ~
-                                    term + BL_AGE + MEN + BMI +
-                                    PREVAL_DIAB.col_from_endpoints + SYSTM + BP_TREAT +
-                                    PREVAL_HFAIL_STRICT.col_from_endpoints + CURR_SMOKE +
-                                    PREVAL_AUTOIMMUN.col_from_endpoints)
-```
-```{r}
-lm_gfr_model_for_taxon <- function(df, term, rank = NULL) {
-  message(term)
-  { if (is.null(rank)) df else df[[rank]] } %>%
-    dplyr::rename(term := {{term}}) %>% 
-    lm_gfr_partial(data = .)
-}
-```
-log(UAC) model + covariates
-```{r}
-lm_uac_partial <-  purrr::partial(lm,
-                                  formula = log(UAC) ~
-                                    term + BL_AGE + MEN + BMI +
-                                    PREVAL_DIAB.col_from_endpoints + SYSTM + BP_TREAT +
-                                    PREVAL_HFAIL_STRICT.col_from_endpoints + CURR_SMOKE +
-                                    PREVAL_AUTOIMMUN.col_from_endpoints)
-```
-```{r}
-lm_uac_model_for_taxon <- function(df, term, rank = NULL) {
-  message(term)
-  { if (is.null(rank)) df else df[[rank]] } %>%
-    dplyr::rename(term := {{term}}) %>% 
-    lm_uac_partial(data = .)
-}
-```
-Creatine model + covariates
-```{r}
-lm_crea_partial <-  purrr::partial(lm,
-                                  formula = KREA_ENTS ~
-                                    term + BL_AGE + MEN + BMI +
-                                    PREVAL_DIAB.col_from_endpoints + SYSTM + BP_TREAT +
-                                    PREVAL_HFAIL_STRICT.col_from_endpoints + CURR_SMOKE +
-                                    PREVAL_AUTOIMMUN.col_from_endpoints)
-```
-```{r}
-lm_crea_model_for_taxon <- function(df, term, rank = NULL) {
-  message(term)
-  { if (is.null(rank)) df else df[[rank]] } %>%
-    dplyr::rename(term := {{term}}) %>% 
-    lm_crea_partial(data = .)
-}
-```
-```{r}
-colSums(assay(tse, "counts"))[1:15]
+#Matching sampleID from functional data to metadata
+#rename 1st column name
+a <- as.data.frame(colData(tse))%>%
+  tibble::rownames_to_column("Barcode")
+# Get the column names (excluding the first one, which is probably the path/feature column)
+sample_names <- colnames(joined_pathabundance)[-1]
 
-#remove samples without any pathways
-tse_sub <- tse[
-  , colSums(assay(tse, "counts")) != 0]
+# Clean sample names by removing after .R1
+cleaned_sample_names <- gsub("\\.R1.*","", sample_names, perl = TRUE)
 
-#remove features not found in any samples
-tse_sub <- tse_sub[
-  rowSums(assay(tse_sub, "counts")) > 0, ]
+# Update the column names with the cleaned sample names
+colnames(joined_pathabundance)[-1] <- cleaned_sample_names
+
+# Find the intersection of sample names between the cleaned joined_path_abundance sample names and FINRISK sample data
+common_samples <- intersect(a$Barcode, cleaned_sample_names)
+
+# Subset the joined_pathabundance file to include only the common samples
+joined_pathabundance<- joined_pathabundance %>%
+  select(all_of(c("Pathway", common_samples)))
+
+rm(tse)
 ```
+Filtering any pathways associated w/ species
+```{r}
+#Analysis focused on finding general pathways
+shit<- joined_pathabundance %>% 
+  filter(rowSums(across(where(is.numeric)))!=0) %>% 
+  filter(!grepl('.s__', Pathway))
+```
+Calculating coefficient of variance
+```{r}
+#calculate standard coefficient variation by row-wise feature
+cv <- shit %>%
+  rowwise() %>%
+  mutate(
+    mean_val = mean(c_across(2:6567)),
+    sd_val = sd(c_across(2:6567)),
+    cv = (sd_val / mean_val) * 100) %>%
+  ungroup()
+
+hist(cv$cv)
+```
+Transpose dataframe
+```{r}
+shit.t <- as.data.frame(t(shit))
+#take first row as colname
+colnames(shit.t) <- shit.t[1,]
+#remove extra row
+shit.t <- shit.t[-1, ] 
+#change from character to numeric
+shit.t <- shit.t %>% mutate_if(is.character, as.numeric) %>%
+  tibble::rownames_to_column("Barcode") 
+```
+Reduce to dichotomous variables (absence / presence)
+```{r}
+poo_dicho <- shit.t %>%
+  mutate(across(where(is.numeric), ~ ifelse(. > 0, 1, 0)))
+```
+Data wrangling to join functional data to metadata
+```{r}
+df <- dplyr::inner_join(poo_dicho, a, by = "Barcode")
+```
+Cox model for testing pathways associated with Incident CKD (outcome variable)
+```{r}
+##COX model
+coxph_full_partial <-  purrr::partial(survival::coxph,
+                                      formula = my_surv(CKD_AGEDIFF, INCIDENT_CKD) ~
+                                        term + BL_AGE + MEN + BMI +
+                                        PREVAL_DIAB.col_from_endpoints + SYSTM + BP_TREAT +
+                                        PREVAL_HFAIL_STRICT.col_from_endpoints + CURR_SMOKE +
+                                        PREVAL_AUTOIMMUN.col_from_endpoints + KREA_ENTS,
+                                      ties = "breslow") %>%
+                      purrr::possibly()
+
+#Take the column names from Pathway in shit dataframe as a list and mutate
+try <- shit %>% dplyr::select(Pathway) %>% 
+  dplyr::mutate(results = purrr::map(Pathway, ~coxph_full_partial(data = df %>% dplyr::rename(term = .x)), .progress = TRUE))
+
+try%>% 
+  dplyr::filter(!is.na(results)) %>%
+  dplyr::mutate(results = purrr::map(results, ~broom::tidy(.x, exponentiate = TRUE, conf.int = TRUE)))  %>%
+  tidyr::unnest(results) %>%
+  dplyr::filter(term == "term") %>%
+  dplyr::mutate(qval_fdr = p.adjust(p.value, method = "BH")) %>%
+  dplyr::arrange(p.value) %>%
+  dplyr::mutate_if(is.numeric, ~round(.x, digits = 3)) %>%
+  DT::datatable(caption = "Cox model for MetaCyc pathways")
+
+try%>% 
+  dplyr::filter(is.na(results))
+```
+Tranform to inverse_rank
+```{r}
+# Define the transformation function
+transform_column <- function(x) {
+  qnorm((rank(x, na.last = "keep") - 0.5) / sum(!is.na(x)))
+}
+
+# Apply the transformation to all columns
+poo_rank <- shit.t
+poo_rank[, -1] <- lapply(shit.t[, -1], transform_column)
+```
+Data wrangling to join functional data to metadata
+```{r}
+df <- dplyr::inner_join(poo_rank, a, by = "Barcode")
+```
+```{r}
+##Cox for inverse rank
+#Take the column names from Pathway in shit dataframe as a list and mutate
+try <- shit %>% dplyr::select(Pathway) %>% 
+  dplyr::mutate(results = purrr::map(Pathway, ~coxph_full_partial(data = df %>% dplyr::rename(term = .x)), .progress = TRUE))
+
+try%>% dplyr::mutate(results = purrr::map(results, ~broom::tidy(.x, exponentiate = TRUE, conf.int = TRUE)))  %>%
+  tidyr::unnest(results) %>%
+  dplyr::filter(term == "term") %>%
+  dplyr::mutate(qval_fdr = p.adjust(p.value, method = "BH")) %>%
+  dplyr::arrange(p.value) %>%
+  dplyr::mutate_if(is.numeric, ~round(.x, digits = 3)) %>%
+  DT::datatable(caption = "Cox model for MetaCyc pathways")
+```
+Remove any samples with zero
+```{r}
+#Take the column names from Pathway in shit dataframe as a list and mutate
+df <- shit.t %>% 
+  mutate_if(is.numeric, ~ifelse(abs(.) < 10^-10, NA, .)) %>%
+  dplyr::inner_join(a, by = "Barcode")
+
+try <- shit %>% 
+  dplyr::select(Pathway) %>% 
+  dplyr::mutate(results = purrr::map(Pathway, ~coxph_full_partial(data = df %>% dplyr::rename(term = .x)), .progress = TRUE, na.rm = TRUE))
+
+try%>% dplyr::mutate(results = purrr::map(results, ~broom::tidy(.x, exponentiate = TRUE, conf.int = TRUE)))  %>%
+  tidyr::unnest(results) %>%
+  dplyr::filter(term == "term") %>%
+  dplyr::mutate(qval_fdr = p.adjust(p.value, method = "BH")) %>%
+  dplyr::arrange(p.value) %>%
+  dplyr::mutate_if(is.numeric, ~round(.x, digits = 3)) %>%
+  DT::datatable(caption = "Cox model for MetaCyc pathways")
+```
+
 
