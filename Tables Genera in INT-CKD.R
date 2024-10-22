@@ -1,4 +1,4 @@
-#Figure 4 Table for top 10 genus in Incident CKD
+#Table for top 10 genus in Incident CKD
 in.ckd<- taxa_rank_list %>%
   purrr::map_df(~tibble::tibble(taxa = .x), .id = "rank") %>% 
   tidyr::gather(rank, taxa) %>%
