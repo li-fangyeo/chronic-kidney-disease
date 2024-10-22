@@ -1,7 +1,7 @@
 ---
-title: "Functional Incident CKD"
-author: "LF Yeo"
-date: "2024-10-07"
+title: "Functional cross-sec"
+author: "Li- Fang Yeo"
+date: "2024-10-11"
 output: html_document
 ---
 
@@ -56,8 +56,7 @@ tse <- readRDS("data/tse_gg2_MGS_FR02.rds") %>%
                                 MEN == 1 & KREA_ENTS <= 80 ~ 141*(KREA_ENTS/79.6)^-0.411,
                                 MEN == 1 & KREA_ENTS >  80 ~ 141*(KREA_ENTS/79.6)^-1.209)) %>%
   tse_mutate(UAC = U_ALB/U_KREA) %>% 
-  tse_filter(GRAVID %in% c(1, NA), BL_USE_RX_J01_1mo %in% c(0, NA)) %>% 
-  tse_filter(GFR >= 60, PREVAL_CKD == 0, UAC <=3 | is.na(UAC)) %>%
+  tse_filter(GRAVID %in% c(1, NA), BL_USE_RX_J01_1mo %in% c(0, NA)) %>%
   tse_filter(dplyr::if_all(dplyr::one_of(names(vars) %difference% "UAC"), not_na)) %>%
   tse_select(names(vars))
 ```
@@ -102,26 +101,32 @@ join functional data to metadata
 #Match samples with (filtered) tse
 a <- as.data.frame(colData(tse))%>%
   tibble::rownames_to_column("Barcode")
+  
 rm(tse)
 
 df <- dplyr::inner_join(poo_dicho, a, by = "Barcode")
 ```
-Cox model for testing pathways associated with Incident CKD (outcome variable)
+Linear model + covariates
 ```{r}
-##COX model
-coxph_full_partial <-  purrr::partial(survival::coxph,
-                                      formula = my_surv(CKD_AGEDIFF, INCIDENT_CKD) ~
-                                        term + BL_AGE + MEN + BMI +
-                                        PREVAL_DIAB.col_from_endpoints + SYSTM + BP_TREAT +
-                                        PREVAL_HFAIL_STRICT.col_from_endpoints + CURR_SMOKE +
-                                        PREVAL_AUTOIMMUN.col_from_endpoints + KREA_ENTS,
-                                      ties = "breslow") %>%
-                      purrr::possibly()
-
-
+#Creatinine
+lm_crea_partial <-  purrr::partial(lm,
+                                  formula = KREA_ENTS ~
+                                    term + BL_AGE + MEN + BMI +
+                                    PREVAL_DIAB.col_from_endpoints + SYSTM + BP_TREAT +
+                                    PREVAL_HFAIL_STRICT.col_from_endpoints + CURR_SMOKE +
+                                    PREVAL_AUTOIMMUN.col_from_endpoints)
+#UAC
+lm_uac_partial <-  purrr::partial(lm,
+                                  formula = log(UAC) ~
+                                    term + BL_AGE + MEN + BMI +
+                                    PREVAL_DIAB.col_from_endpoints + SYSTM + BP_TREAT +
+                                    PREVAL_HFAIL_STRICT.col_from_endpoints + CURR_SMOKE +
+                                    PREVAL_AUTOIMMUN.col_from_endpoints)
+```
+```{r}
 #Take the column names from Pathway in shit dataframe as a list and mutate
 try <- shit.10 %>% dplyr::select(Pathway) %>% 
-  dplyr::mutate(results = purrr::map(Pathway, ~coxph_full_partial(data = df %>% dplyr::rename(term = .x)), .progress = TRUE))
+  dplyr::mutate(results = purrr::map(Pathway, ~lm_crea_partial(data = df %>% dplyr::rename(term = .x)), .progress = TRUE))
 
 try%>% 
   dplyr::filter(!is.na(results)) %>%
@@ -130,8 +135,32 @@ try%>%
   dplyr::filter(term == "term") %>%
   dplyr::mutate(qval_fdr = p.adjust(p.value, method = "BH")) %>%
   dplyr::arrange(p.value) %>%
-  dplyr::mutate_if(is.numeric, ~round(.x, digits = 3)) %>%
-  DT::datatable(caption = "Cox model for MetaCyc pathways")
+  dplyr::mutate_if(is.numeric, ~round(.x, digits = 4)) %>%
+  DT::datatable(caption = "Linear model for MetaCyc pathways")
+```
+```{r}
+#UAC
+lm_uac_partial <-  purrr::partial(lm,
+                                  formula = log(UAC) ~
+                                    term + BL_AGE + MEN + BMI +
+                                    PREVAL_DIAB.col_from_endpoints + SYSTM + BP_TREAT +
+                                    PREVAL_HFAIL_STRICT.col_from_endpoints + CURR_SMOKE +
+                                    PREVAL_AUTOIMMUN.col_from_endpoints)
+```
+```{r}
+#Take the column names from Pathway in shit dataframe as a list and mutate
+try <- shit.10 %>% dplyr::select(Pathway) %>% 
+  dplyr::mutate(results = purrr::map(Pathway, ~lm_uac_partial(data = df %>% dplyr::rename(term = .x)), .progress = TRUE))
+
+try%>% 
+  dplyr::filter(!is.na(results)) %>%
+  dplyr::mutate(results = purrr::map(results, ~broom::tidy(.x, exponentiate = TRUE, conf.int = TRUE)))  %>%
+  tidyr::unnest(results) %>%
+  dplyr::filter(term == "term") %>%
+  dplyr::mutate(qval_fdr = p.adjust(p.value, method = "BH")) %>%
+  dplyr::arrange(p.value) %>%
+  dplyr::mutate_if(is.numeric, ~round(.x, digits = 4)) %>%
+  DT::datatable(caption = "Linear model for MetaCyc pathways")
 ```
 Tranform to inverse_rank
 ```{r}
@@ -148,39 +177,43 @@ Data wrangling to join functional data to metadata
 ```{r}
 #Here you will have the correct number of samples
 df <- dplyr::inner_join(poo_rank, a, by = "Barcode")
-```
-```{r}
-##Cox for inverse rank
+
+##Linear model
 #Take the column names from Pathway in shit dataframe as a list and mutate
 try <- shit.10 %>% dplyr::select(Pathway) %>% 
-  dplyr::mutate(results = purrr::map(Pathway, ~coxph_full_partial(data = df %>% dplyr::rename(term = .x)), .progress = TRUE))
+  dplyr::mutate(results = purrr::map(Pathway, ~lm_crea_partial(data = df %>% dplyr::rename(term = .x)), .progress = TRUE))
 
-try%>% dplyr::mutate(results = purrr::map(results, ~broom::tidy(.x, exponentiate = TRUE, conf.int = TRUE)))  %>%
+try%>% 
+  dplyr::filter(!is.na(results)) %>%
+  dplyr::mutate(results = purrr::map(results, ~broom::tidy(.x, exponentiate = TRUE, conf.int = TRUE)))  %>%
   tidyr::unnest(results) %>%
   dplyr::filter(term == "term") %>%
   dplyr::mutate(qval_fdr = p.adjust(p.value, method = "BH")) %>%
   dplyr::arrange(p.value) %>%
-  dplyr::mutate_if(is.numeric, ~round(.x, digits = 3)) %>%
-  DT::datatable(caption = "Cox model for MetaCyc pathways")
+  dplyr::mutate_if(is.numeric, ~round(.x, digits = 4)) %>%
+  DT::datatable(caption = "Linear model for MetaCyc pathways")
 ```
-#Remove any samples with zero
+```{r}
+#UAC
+lm_uac_partial <-  purrr::partial(lm,
+                                  formula = log(UAC) ~
+                                    term + BL_AGE + MEN + BMI +
+                                    PREVAL_DIAB.col_from_endpoints + SYSTM + BP_TREAT +
+                                    PREVAL_HFAIL_STRICT.col_from_endpoints + CURR_SMOKE +
+                                    PREVAL_AUTOIMMUN.col_from_endpoints)
+```
 ```{r}
 #Take the column names from Pathway in shit dataframe as a list and mutate
-#df <- shit.t %>% 
-#  mutate_if(is.numeric, ~ifelse(abs(.) < 10^-10, NA, .)) %>%
- # dplyr::inner_join(a, by = "Barcode")
+try <- shit.10 %>% dplyr::select(Pathway) %>% 
+  dplyr::mutate(results = purrr::map(Pathway, ~lm_uac_partial(data = df %>% dplyr::rename(term = .x)), .progress = TRUE))
 
-#try <- shit %>% 
-#  dplyr::select(Pathway) %>% 
- # dplyr::mutate(results = purrr::map(Pathway, ~coxph_full_partial(data = df %>% dplyr::rename(term = .x)), .progress = TRUE, na.rm = TRUE))
-
-#try%>% dplyr::mutate(results = purrr::map(results, ~broom::tidy(.x, exponentiate = TRUE, conf.int = TRUE)))  %>%
- # tidyr::unnest(results) %>%
- # dplyr::filter(term == "term") %>%
- # dplyr::mutate(qval_fdr = p.adjust(p.value, method = "BH")) %>%
- # dplyr::arrange(p.value) %>%
-#  dplyr::mutate_if(is.numeric, ~round(.x, digits = 3)) %>%
- # DT::datatable(caption = "Cox model for MetaCyc pathways")
+try%>% 
+  dplyr::filter(!is.na(results)) %>%
+  dplyr::mutate(results = purrr::map(results, ~broom::tidy(.x, exponentiate = TRUE, conf.int = TRUE)))  %>%
+  tidyr::unnest(results) %>%
+  dplyr::filter(term == "term") %>%
+  dplyr::mutate(qval_fdr = p.adjust(p.value, method = "BH")) %>%
+  dplyr::arrange(p.value) %>%
+  dplyr::mutate_if(is.numeric, ~round(.x, digits = 4)) %>%
+  DT::datatable(caption = "Linear model for MetaCyc pathways")
 ```
-
-
