@@ -35,7 +35,7 @@ forest <- forest(alpha_nephro[,c(1,2, 9, 8, 4)],
             ci_column = 4,
             #ref_line = 1,
             xlab = " β ",
-            xlim = c(-2, 2),
+            xlim = c(-2.5, 2.5),
             theme = tm)
 
 # Print plot

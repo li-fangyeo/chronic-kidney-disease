@@ -1,7 +1,7 @@
 ---
-title: "Gut microbiome and Chronic Kidney Disease Prevalence"
+title: "Gut microbiome and Chronic Kidney Disease Prevalence - 5% prevalence"
 author: "Joonatan Palmu, Li-Fang Yeo"
-date: "17th Sept 2024"
+date: "31st Oct 2024"
 output: html_document
 ---
 ```{r setup, include=FALSE} 
@@ -21,7 +21,7 @@ args <- list(
   optparse::make_option("--low", action="store_true", default=FALSE, help="Exclude low GFR [default \"%default\"]"),
   optparse::make_option("--high", action="store_true", default=FALSE, help="Exclude high GFR [default \"%default\"]"),
   optparse::make_option("--detection", type = "numeric", default = 0.1/100, help = "Detection limit [default %default]"),
-optparse::make_option("--prevalence", type = "numeric", default = 1/100, help = "Prevalence limit [default %default]")) %>% 
+optparse::make_option("--prevalence", type = "numeric", default = 5/100, help = "Prevalence limit [default %default]")) %>% 
   optparse::OptionParser(option_list = .) %>%
   optparse::parse_args()
 ```
@@ -46,15 +46,15 @@ Data definition
 vars <- list(BL_AGE = "Age",
              MEN = "Men",
              BMI = "BMI",
-             PREVAL_DIAB.col_from_endpoints = "Diabetes",
+             PREVAL_DIAB = "Diabetes",
              SYSTM = "Systolic blood pressure",
              BP_TREAT = "Antihypertensive medication",
-             PREVAL_HFAIL_STRICT.col_from_endpoints = "Heart failure",
+             PREVAL_HFAIL_STRICT = "Heart failure",
              PREVAL_CKD = "Prevalent CKD",
              INCIDENT_CKD = "Incident CKD",
              CKD_AGEDIFF = "CKD Agediff",
              CURR_SMOKE = "Smoking",
-             PREVAL_AUTOIMMUN.col_from_endpoints  = "Autoimmune disease",
+             PREVAL_AUTOIMMUN  = "Autoimmune disease",
              KREA_ENTS = "Creatinine",
              GFR = "Glomerulal filtration rate",
              UAC = "Urine Albumin-Creatinine Ratio",
@@ -63,9 +63,9 @@ vars <- list(BL_AGE = "Age",
 ```
 Read data in, calculate GFR, UAC and remove NAs
 ```{r}
-tse <- readRDS("data/tse_gg2_MGS_FR02.rds") %>%
+tse <- readRDS("../data/tse_mgs-20241118_104759.rds") %>%
   mia::transformAssay(assay.type = "counts", method = "relabundance") %>% 
-  mia::addAlpha(assay.type = "counts", index = "shannon", name = "shannon") %>%
+  mia::estimateDiversity(assay.type = "counts", index = "shannon", name = "shannon") %>%
   tse_mutate(dplyr::across(c(MEN,
                              EAST,
                              BP_TREAT,
@@ -79,11 +79,8 @@ tse <- readRDS("data/tse_gg2_MGS_FR02.rds") %>%
                                 MEN == 1 & KREA_ENTS >  80 ~ 141*(KREA_ENTS/79.6)^-1.209)) %>%
   tse_mutate(UAC = U_ALB/U_KREA) %>% 
   tse_filter(GRAVID %in% c(1, NA), BL_USE_RX_J01_1mo %in% c(0, NA)) %>%
-  { if (args$low) tse_filter(., GFR >= 60) else . } %>%
-  { if (args$high) tse_filter(., GFR < 60) else . } %>% 
-  { if (args$east) tse_filter(., EAST == 0) else . } %>% 
-  { if (args$west) tse_filter(., EAST == 1) else . } %>% 
   tse_filter(dplyr::if_all(dplyr::one_of(names(vars) %difference% "UAC"), not_na)) %>%
+  tse_filter(total_reads > 50000) %>%
   tse_select(names(vars))
 ```
 
@@ -91,8 +88,7 @@ tse <- readRDS("data/tse_gg2_MGS_FR02.rds") %>%
 ```{r}
 tse %>%
   tse_meta(rownames = FALSE) %>%
-  dplyr::mutate(INCIDENT_CKD = factor(ifelse(INCIDENT_CKD == 1, "Incident CKD" , "No CKD"))) %>%
-  mytableone(vars )
+  mytableone(vars)
 ```
 # Distributions
 ```{r}
@@ -121,9 +117,9 @@ GFR model + covariates
 lm_gfr_partial <-  purrr::partial(lm,
                                   formula = GFR ~
                                     term + BL_AGE + MEN + BMI +
-                                    PREVAL_DIAB.col_from_endpoints + SYSTM + BP_TREAT +
-                                    PREVAL_HFAIL_STRICT.col_from_endpoints + CURR_SMOKE +
-                                    PREVAL_AUTOIMMUN.col_from_endpoints)
+                                    PREVAL_DIAB + SYSTM + BP_TREAT +
+                                    PREVAL_HFAIL_STRICT + CURR_SMOKE +
+                                    PREVAL_AUTOIMMUN)
 ```
 ```{r}
 lm_gfr_model_for_taxon <- function(df, term, rank = NULL) {
@@ -138,9 +134,9 @@ log(UAC) model + covariates
 lm_uac_partial <-  purrr::partial(lm,
                                   formula = log(UAC) ~
                                     term + BL_AGE + MEN + BMI +
-                                    PREVAL_DIAB.col_from_endpoints + SYSTM + BP_TREAT +
-                                    PREVAL_HFAIL_STRICT.col_from_endpoints + CURR_SMOKE +
-                                    PREVAL_AUTOIMMUN.col_from_endpoints)
+                                    PREVAL_DIAB + SYSTM + BP_TREAT +
+                                    PREVAL_HFAIL_STRICT + CURR_SMOKE +
+                                    PREVAL_AUTOIMMUN)
 ```
 ```{r}
 lm_uac_model_for_taxon <- function(df, term, rank = NULL) {
@@ -155,9 +151,9 @@ Creatine model + covariates
 lm_crea_partial <-  purrr::partial(lm,
                                   formula = KREA_ENTS ~
                                     term + BL_AGE + MEN + BMI +
-                                    PREVAL_DIAB.col_from_endpoints + SYSTM + BP_TREAT +
-                                    PREVAL_HFAIL_STRICT.col_from_endpoints + CURR_SMOKE +
-                                    PREVAL_AUTOIMMUN.col_from_endpoints)
+                                    PREVAL_DIAB + SYSTM + BP_TREAT +
+                                    PREVAL_HFAIL_STRICT + CURR_SMOKE +
+                                    PREVAL_AUTOIMMUN)
 ```
 ```{r}
 lm_crea_model_for_taxon <- function(df, term, rank = NULL) {
@@ -206,9 +202,9 @@ GFR
 tse %>%
   tse_meta(rownames = FALSE) %>% 
   lm(GFR ~ shannon + BL_AGE + MEN + BMI +
-       PREVAL_DIAB.col_from_endpoints + SYSTM + BP_TREAT +
-       PREVAL_HFAIL_STRICT.col_from_endpoints + CURR_SMOKE +
-       PREVAL_AUTOIMMUN.col_from_endpoints, data = .) %>% 
+       PREVAL_DIAB + SYSTM + BP_TREAT +
+       PREVAL_HFAIL_STRICT + CURR_SMOKE +
+       PREVAL_AUTOIMMUN, data = .) %>% 
   broom::tidy(conf.int = TRUE) %>%
   round_numeric_columns() %>% 
   DT::datatable(caption = "Alpha diversity to GFR")
@@ -218,9 +214,9 @@ Crea
 tse %>%
   tse_meta(rownames = FALSE) %>%
   lm(KREA_ENTS ~ shannon + BL_AGE + MEN + BMI +
-       PREVAL_DIAB.col_from_endpoints + SYSTM + BP_TREAT +
-       PREVAL_HFAIL_STRICT.col_from_endpoints + CURR_SMOKE +
-       PREVAL_AUTOIMMUN.col_from_endpoints, data = .) %>% 
+       PREVAL_DIAB + SYSTM + BP_TREAT +
+       PREVAL_HFAIL_STRICT + CURR_SMOKE +
+       PREVAL_AUTOIMMUN, data = .) %>% 
   broom::tidy(conf.int = TRUE) %>%
   round_numeric_columns() %>% 
   DT::datatable(caption = "Alpha diversity to Creatinine")
@@ -231,9 +227,9 @@ tse %>%
   tse_meta(rownames = FALSE) %>%
   dplyr::filter(!is.na(UAC)) %>% 
   lm(UAC ~ shannon + BL_AGE + MEN + BMI +
-       PREVAL_DIAB.col_from_endpoints + SYSTM + BP_TREAT +
-       PREVAL_HFAIL_STRICT.col_from_endpoints + CURR_SMOKE +
-       PREVAL_AUTOIMMUN.col_from_endpoints, data = .) %>% 
+       PREVAL_DIAB + SYSTM + BP_TREAT +
+       PREVAL_HFAIL_STRICT + CURR_SMOKE +
+       PREVAL_AUTOIMMUN, data = .) %>% 
   broom::tidy(conf.int = TRUE) %>%
   round_numeric_columns() %>% 
   DT::datatable(caption = "Alpha diversity to UAC")
@@ -241,7 +237,7 @@ tse %>%
 #Common taxa
 Agglomerate prevalent features
 ```{r}
-#reads were filtered to detection threshold of 0.1% relative abundance, in 1% of samples
+#reads were filtered to detection threshold of 0.1% relative abundance, in 5% of samples
 #This is to filter out rare taxa, to ensure we are anlaysing microbes that are likely to be real and not sequencing artefacts
 subset_features_partial <-  purrr::partial(mia::subsetByPrevalentFeatures,
                                            x = tse,
@@ -450,9 +446,9 @@ Calculate RDA using Bray-curtis at the species level with only age and sex covar
    # mia::transformAssay(method = "relabundance") %>%
    #  mia::runRDA(assay.type = "relabundance",
     #            formula = assay ~ BL_AGE + MEN + BMI +
-    #                                PREVAL_DIAB.col_from_endpoints + SYSTM + BP_TREAT +
-    #                                PREVAL_HFAIL_STRICT.col_from_endpoints + CURR_SMOKE +
-    #                                PREVAL_AUTOIMMUN.col_from_endpoints + GFR ,
+    #                                PREVAL_DIAB + SYSTM + BP_TREAT +
+    #                                PREVAL_HFAIL_STRICT + CURR_SMOKE +
+    #                                PREVAL_AUTOIMMUN + GFR ,
     #            distance = "bray",
     #            na.action = na.exclude)
 ```
