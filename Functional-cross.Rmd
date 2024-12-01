@@ -27,23 +27,23 @@ shit <- readRDS("path.abund.rds")
 vars <- list(BL_AGE = "Age",
              MEN = "Men",
              BMI = "BMI",
-             PREVAL_DIAB.col_from_endpoints = "Diabetes",
+             PREVAL_DIAB = "Diabetes",
              SYSTM = "Systolic blood pressure",
              BP_TREAT = "Antihypertensive medication",
-             PREVAL_HFAIL_STRICT.col_from_endpoints = "Heart failure",
+             PREVAL_HFAIL_STRICT = "Heart failure",
              PREVAL_CKD = "Prevalent CKD",
              INCIDENT_CKD = "Incident CKD",
              CKD_AGEDIFF = "CKD Agediff",
              CURR_SMOKE = "Smoking",
-             PREVAL_AUTOIMMUN.col_from_endpoints = "Autoimmune disease",
+             PREVAL_AUTOIMMUN  = "Autoimmune disease",
              KREA_ENTS = "Creatinine",
              GFR = "Glomerulal filtration rate",
              UAC = "Urine Albumin-Creatinine Ratio",
-             EAST = "Eastern Finland") 
+             EAST = "Eastern Finland")
 
 #Importing metadata and cleaning up
 #needed to match SampleID and covariates
-tse <- readRDS("data/tse_gg2_MGS_FR02.rds") %>%
+tse <- readRDS("../data/tse_mgs-20241118_104759.rds") %>%
   tse_mutate(dplyr::across(c(MEN,
                              EAST,
                              BP_TREAT,
@@ -56,8 +56,10 @@ tse <- readRDS("data/tse_gg2_MGS_FR02.rds") %>%
                                 MEN == 1 & KREA_ENTS <= 80 ~ 141*(KREA_ENTS/79.6)^-0.411,
                                 MEN == 1 & KREA_ENTS >  80 ~ 141*(KREA_ENTS/79.6)^-1.209)) %>%
   tse_mutate(UAC = U_ALB/U_KREA) %>% 
-  tse_filter(GRAVID %in% c(1, NA), BL_USE_RX_J01_1mo %in% c(0, NA)) %>%
+  tse_filter(GRAVID %in% c(1, NA)) %>%
+  tse_filter(BL_USE_RX_J01_1mo %in% c(0, NA)) %>%
   tse_filter(dplyr::if_all(dplyr::one_of(names(vars) %difference% "UAC"), not_na)) %>%
+  tse_filter(total_reads > 35000) %>%
   tse_select(names(vars))
 ```
 Prevalence filtering
@@ -72,7 +74,7 @@ shit.10 <- shit.t %>%
   summarize(across(everything(), mean)) %>%
   tidyr::gather(Pathway,prevalence) %>%
   #filter for pathways that are prevalent in 10%
-  dplyr::filter(prevalence >0.1) 
+  dplyr::filter(prevalence >0.05) 
 
 # filtered to only prevalent pathways
 hi <- shit.10 %>% 
@@ -112,16 +114,16 @@ Linear model + covariates
 lm_crea_partial <-  purrr::partial(lm,
                                   formula = KREA_ENTS ~
                                     term + BL_AGE + MEN + BMI +
-                                    PREVAL_DIAB.col_from_endpoints + SYSTM + BP_TREAT +
-                                    PREVAL_HFAIL_STRICT.col_from_endpoints + CURR_SMOKE +
-                                    PREVAL_AUTOIMMUN.col_from_endpoints)
+                                    PREVAL_DIAB + SYSTM + BP_TREAT +
+                                    PREVAL_HFAIL_STRICT + CURR_SMOKE +
+                                    PREVAL_AUTOIMMUN)
 #UAC
 lm_uac_partial <-  purrr::partial(lm,
                                   formula = log(UAC) ~
                                     term + BL_AGE + MEN + BMI +
-                                    PREVAL_DIAB.col_from_endpoints + SYSTM + BP_TREAT +
-                                    PREVAL_HFAIL_STRICT.col_from_endpoints + CURR_SMOKE +
-                                    PREVAL_AUTOIMMUN.col_from_endpoints)
+                                    PREVAL_DIAB + SYSTM + BP_TREAT +
+                                    PREVAL_HFAIL_STRICT + CURR_SMOKE +
+                                    PREVAL_AUTOIMMUN)
 ```
 ```{r}
 #Take the column names from Pathway in shit dataframe as a list and mutate
@@ -139,15 +141,6 @@ try%>%
   DT::datatable(caption = "Linear model for MetaCyc pathways")
 ```
 ```{r}
-#UAC
-lm_uac_partial <-  purrr::partial(lm,
-                                  formula = log(UAC) ~
-                                    term + BL_AGE + MEN + BMI +
-                                    PREVAL_DIAB.col_from_endpoints + SYSTM + BP_TREAT +
-                                    PREVAL_HFAIL_STRICT.col_from_endpoints + CURR_SMOKE +
-                                    PREVAL_AUTOIMMUN.col_from_endpoints)
-```
-```{r}
 #Take the column names from Pathway in shit dataframe as a list and mutate
 try <- shit.10 %>% dplyr::select(Pathway) %>% 
   dplyr::mutate(results = purrr::map(Pathway, ~lm_uac_partial(data = df %>% dplyr::rename(term = .x)), .progress = TRUE))
@@ -162,6 +155,7 @@ try%>%
   dplyr::mutate_if(is.numeric, ~round(.x, digits = 4)) %>%
   DT::datatable(caption = "Linear model for MetaCyc pathways")
 ```
+
 Tranform to inverse_rank
 ```{r}
 # Define the transformation function
@@ -192,15 +186,6 @@ try%>%
   dplyr::arrange(p.value) %>%
   dplyr::mutate_if(is.numeric, ~round(.x, digits = 4)) %>%
   DT::datatable(caption = "Linear model for MetaCyc pathways")
-```
-```{r}
-#UAC
-lm_uac_partial <-  purrr::partial(lm,
-                                  formula = log(UAC) ~
-                                    term + BL_AGE + MEN + BMI +
-                                    PREVAL_DIAB.col_from_endpoints + SYSTM + BP_TREAT +
-                                    PREVAL_HFAIL_STRICT.col_from_endpoints + CURR_SMOKE +
-                                    PREVAL_AUTOIMMUN.col_from_endpoints)
 ```
 ```{r}
 #Take the column names from Pathway in shit dataframe as a list and mutate

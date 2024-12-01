@@ -1,26 +1,17 @@
-#Figure 2 - beta diversity plot
-#Figure 3b 
-library(ggfortify) 
-library(mia)
-#convert tse to a dataframe.
-pca
-pc_df <- as.data.frame(colData(tse))
+#Figure 1B - beta diversity plot
+beta<- readRDS("permanova/beta_GFR2.rds")
+p <- plotReducedDim(beta, "RDA",
+                    colour_by = "GFR")
+dots <- p + theme(title = element_text(size = 15)) +
+  scale_color_gradient(high = "darkslategrey", low = "orange") +
+  labs(color = "eGFR") + theme_classic()+ 
+  theme(legend.title = element_text(size = 16),
+        legend.text = element_text(size = 16),
+        axis.text=element_text(size=14),
+        axis.title = element_text(size = 16))
 
-pca.plot <- autoplot(pca, 
-                  data = pc_df, 
-                  colour = 'GFR') 
-
-dots<- pca.plot + 
-      theme(title = element_text(size = 15)) +
-  scale_color_gradient(high = "darkslategrey", low = "orange")
-
-dots <- dots + labs(color = "eGFR") + theme_classic()+ 
-        theme(legend.title = element_text(size = 16),
-              legend.text = element_text(size = 16),
-              axis.text=element_text(size=14),
-              axis.title = element_text(size = 16))
 dots
-#17072024
+
 ##For two figures
 library(ggplot2)
 library("grid")

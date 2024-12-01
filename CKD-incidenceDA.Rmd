@@ -1,11 +1,11 @@
 ---
-title: "CKD-Ancom-BC - Phylum and Genus"
+title: "CKD-Ancom-BC - Phylum, Genus, Species"
 author: "Joonatan Palmu, Li-Fang Yeo"
-date: "19th Sept 2024"
+date: "1st Dec 2024"
 output: html_document
 ---
 ```{r setup, include=FALSE} 
-knitr::opts_chunk$set(warning = FALSE) 
+knitr::opts_chunk$set(warning = FALSE, message = FALSE) 
 ```
 ```{r}
 library(magrittr)
@@ -21,7 +21,7 @@ args <- list(
   optparse::make_option("--east", action="store_true", default=FALSE, help="Exclude Eastern Finland subpopulation [default \"%default\"]"),
   optparse::make_option("--west", action="store_true", default=FALSE, help="Exclude Eastern Finland subpopulation [default \"%default\"]"),
   optparse::make_option("--detection", type = "numeric", default = 0.1/100, help = "Detection limit [default %default]"),
-  optparse::make_option("--prevalence", type = "numeric", default = 1/100, help = "Prevalence limit [default %default]")) %>% 
+  optparse::make_option("--prevalence", type = "numeric", default = 5/100, help = "Prevalence limit [default %default]")) %>% 
   optparse::OptionParser(option_list = .) %>%
   optparse::parse_args()
 
@@ -45,26 +45,27 @@ Data definition
 vars <- list(BL_AGE = "Age",
              MEN = "Men",
              BMI = "BMI",
-             PREVAL_DIAB.col_from_endpoints = "Diabetes",
+             PREVAL_DIAB = "Diabetes",
              SYSTM = "Systolic blood pressure",
              BP_TREAT = "Antihypertensive medication",
-             PREVAL_HFAIL_STRICT.col_from_endpoints = "Heart failure",
+             PREVAL_HFAIL_STRICT = "Heart failure",
              PREVAL_CKD = "Prevalent CKD",
              INCIDENT_CKD = "Incident CKD",
              CKD_AGEDIFF = "CKD Agediff",
              CURR_SMOKE = "Smoking",
-             PREVAL_AUTOIMMUN.col_from_endpoints = "Autoimmune disease",
+             PREVAL_AUTOIMMUN = "Autoimmune disease",
              KREA_ENTS = "Creatinine",
              GFR = "Glomerulal filtration rate",
              UAC = "Urine Albumin-Creatinine Ratio",
              EAST = "Eastern Finland",
-             shannon = "Shannon diversity") 
+             shannon = "Shannon diversity",
+             total_reads = "Total reads") 
 ```
 Read in data, calculate alpha, tidy data for selected variables
 ```{r}
-tse <- readRDS("data/tse_gg2_MGS_FR02.rds") %>%
+tse <- readRDS("../data/tse_mgs-20241118_104759.rds") %>%
   mia::transformAssay(assay.type = "counts", method = "relabundance") %>% 
-  mia::addAlpha(assay.type = "counts", index = "shannon", name = "shannon") %>%
+  mia::estimateDiversity(assay.type = "counts", index = "shannon", name = "shannon") %>%
   tse_mutate(dplyr::across(c(MEN,
                              EAST,
                              BP_TREAT,
@@ -77,11 +78,11 @@ tse <- readRDS("data/tse_gg2_MGS_FR02.rds") %>%
                                 MEN == 1 & KREA_ENTS <= 80 ~ 141*(KREA_ENTS/79.6)^-0.411,
                                 MEN == 1 & KREA_ENTS >  80 ~ 141*(KREA_ENTS/79.6)^-1.209)) %>%
   tse_mutate(UAC = U_ALB/U_KREA) %>% 
-  tse_filter(GRAVID %in% c(1, NA), BL_USE_RX_J01_1mo %in% c(0, NA)) %>% 
+  tse_filter(GRAVID %in% c(1, NA), BL_USE_RX_J01_1mo %in% c(0, NA)) %>%
+  #this line filters out people with prevalent CKD
   tse_filter(GFR >= 60, PREVAL_CKD == 0, UAC <=3 | is.na(UAC)) %>%
-  { if (args$east) tse_filter(., EAST == 0) else . } %>% 
-  { if (args$west) tse_filter(., EAST == 1) else . } %>% 
   tse_filter(dplyr::if_all(dplyr::one_of(names(vars) %difference% "UAC"), not_na)) %>%
+  tse_filter(total_reads > 35000) %>%
   tse_select(names(vars))
 ```
 Table one / characteristics of data
@@ -91,11 +92,11 @@ tse %>%
   dplyr::mutate(INCIDENT_CKD = factor(ifelse(INCIDENT_CKD == 1, "Incident CKD" , "No CKD"))) %>%
   mytableone(vars,fo =  ~ .| INCIDENT_CKD )
 ```
-Family
+#Species
 ```{r}
-tse_species <- mia::subsetByPrevalentFeatures(tse, rank = "Family",
+tse_species <- mia::subsetByPrevalentFeatures(tse, rank = "Species",
                                               detection = 0.1/100,
-                                              prevalence = 1/100,
+                                              prevalence = 5/100,
                                               as_relative = TRUE)
 ```
 ANCOM-BC2 for Incident CKD
@@ -106,9 +107,76 @@ pcol <- glue::glue("q_INCIDENT_CKD1")
 ancombc2 <- tse_species %>%
   ANCOMBC::ancombc2(data = .,
                     fix_formula = c("INCIDENT_CKD", "BL_AGE", "MEN", "BMI",
-                                    "PREVAL_DIAB.col_from_endpoints", "SYSTM",
-                                    "BP_TREAT", "CURR_SMOKE","PREVAL_HFAIL_STRICT.col_from_endpoints",
-                                    "PREVAL_AUTOIMMUN.col_from_endpoints", "KREA_ENTS") %>%
+                                    "PREVAL_DIAB", "SYSTM",
+                                    "BP_TREAT", "CURR_SMOKE","PREVAL_HFAIL_STRICT",
+                                    "PREVAL_AUTOIMMUN", "KREA_ENTS") %>%
+                      stringr::str_c(collapse = "+"),
+                    assay.type = "counts",
+                    p_adj_method = "fdr",
+                    verbose = TRUE,
+                    neg_lb = TRUE)
+```
+```{r}
+df_all <- ancombc2$res %>%
+  dplyr::select(taxon, contains("INCIDENT_CKD")) %>%
+  dplyr::arrange(!!rlang::sym(pcol))
+```
+
+```{r}
+df_all %>%
+  round_numeric_columns() %>% 
+  DT::datatable(caption = "All")
+```
+#Species
+```{r}
+tse_species <- mia::subsetByPrevalentFeatures(tse, rank = "Species",
+                                              detection = 0.1/100,
+                                              prevalence = 5/100,
+                                              as_relative = TRUE)
+```
+ANCOM-BC2 for Incident CKD
+```{r}
+pcol <- glue::glue("q_INCIDENT_CKD1")
+```
+```{r}
+ancombc2 <- tse_species %>%
+  ANCOMBC::ancombc2(data = .,
+                    fix_formula = c("INCIDENT_CKD", "BL_AGE", "MEN") %>%
+                      stringr::str_c(collapse = "+"),
+                    assay.type = "counts",
+                    p_adj_method = "fdr",
+                    verbose = TRUE,
+                    neg_lb = TRUE)
+```
+```{r}
+df_all <- ancombc2$res %>%
+  dplyr::select(taxon, contains("INCIDENT_CKD")) %>%
+  dplyr::arrange(!!rlang::sym(pcol))
+```
+
+```{r}
+df_all %>%
+  round_numeric_columns() %>% 
+  DT::datatable(caption = "All")
+```
+Family
+```{r}
+tse_species <- mia::subsetByPrevalentFeatures(tse, rank = "Family",
+                                              detection = 0.1/100,
+                                              prevalence = 5/100,
+                                              as_relative = TRUE)
+```
+ANCOM-BC2 for Incident CKD
+```{r}
+pcol <- glue::glue("q_INCIDENT_CKD1")
+```
+```{r}
+ancombc2 <- tse_species %>%
+  ANCOMBC::ancombc2(data = .,
+                    fix_formula = c("INCIDENT_CKD", "BL_AGE", "MEN", "BMI",
+                                    "PREVAL_DIAB", "SYSTM",
+                                    "BP_TREAT", "CURR_SMOKE","PREVAL_HFAIL_STRICT",
+                                    "PREVAL_AUTOIMMUN", "KREA_ENTS") %>%
                       stringr::str_c(collapse = "+"),
                     assay.type = "counts",
                     p_adj_method = "fdr",
@@ -130,7 +198,7 @@ Phylum
 ```{r}
 tse_genus <- mia::subsetByPrevalentFeatures(tse, rank = "Phylum",
                                               detection = 0.1/100,
-                                              prevalence = 1/100,
+                                              prevalence = 5/100,
                                               as_relative = TRUE)
 ```
 ANCOM-BC2 for Incident CKD
@@ -141,9 +209,9 @@ pcol <- glue::glue("q_INCIDENT_CKD1")
 ancombc2 <- tse_genus %>%
   ANCOMBC::ancombc2(data = .,
                     fix_formula = c("INCIDENT_CKD", "BL_AGE", "MEN", "BMI",
-                                    "PREVAL_DIAB.col_from_endpoints", "SYSTM",
-                                    "BP_TREAT", "CURR_SMOKE","PREVAL_HFAIL_STRICT.col_from_endpoints",
-                                    "PREVAL_AUTOIMMUN.col_from_endpoints", "KREA_ENTS") %>%
+                                    "PREVAL_DIAB", "SYSTM",
+                                    "BP_TREAT", "CURR_SMOKE","PREVAL_HFAIL_STRICT",
+                                    "PREVAL_AUTOIMMUN", "KREA_ENTS") %>%
                       stringr::str_c(collapse = "+"),
                     assay.type = "counts",
                     p_adj_method = "fdr",

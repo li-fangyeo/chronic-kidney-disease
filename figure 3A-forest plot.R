@@ -6,13 +6,13 @@ library(tibble)
 library(mia)
 library(survivalAnalysis)
 library(readr)
-##manually change the column names and reordered based on ascending order
+##manually change the column names and reordered based on ascending order and change p value to <0.001
 cox <- read_csv("cox-CKD.csv")
 
 #cox$'' <- cut(cox$'P', breaks=c(-Inf, 0.001, 0.01, 0.05, Inf), label=c("***", "**", "*", "")) 
 cox
 
-cox$'' <- paste(rep(" ", 28), collapse = " ")
+cox$'' <- paste(rep(" ", 30), collapse = " ")
 
 # Create a confidence interval column to display
 cox$`HR (95% CI)` <- ifelse(is.na(cox$std.error), "",
@@ -31,13 +31,13 @@ tm <- forest_theme(base_size = 15,
                    ci_Theight = 0.2,
                    ci_lwd = 2)
 
-cox.CKD <- forest(cox[,c(1,9,8,5)],
+cox.CKD <- forest(cox[,c(2,10,9,6)],
                 est = cox$estimate,
                 lower = cox$conf.low, 
                 upper = cox$conf.high,
                 ci_column = 3,
                 ref_line = 1,
-                xlim = c(0,10),
+                xlim = c(0,8),
                 ticks_at = c(0.25,0.5,1,2,4,6,8),
                 theme = tm ,
                 x_trans = c("log10"),
@@ -45,7 +45,7 @@ cox.CKD <- forest(cox[,c(1,9,8,5)],
 
 # Print plot
 plot(cox.CKD)
-ggplot2::ggsave(filename = "coxCKD19092024.pdf", 
+ggplot2::ggsave(filename = "coxCKD28112024.pdf", 
                 plot = cox.CKD,
                 #dpi = 300,
                 width = 10,

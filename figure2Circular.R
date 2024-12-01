@@ -34,7 +34,7 @@ k<- rbind(h,i,j)
 k
 #d$stars <- cut(d$'qval_fdr', breaks=c(-Inf, 0.001, 0.01, 0.05, Inf), label=c("***", "**", "*", ""))
 
-k$taxa <- gsub("GUT_", "",x=k$taxa)
+k$taxa <- gsub("GUT_Species:", "",x=k$taxa)
 k$taxa<- factor(k$taxa, levels=rev(sort(unique(k$taxa))))
 k<- k %>% arrange(estimate) 
 
@@ -69,7 +69,6 @@ nested
 ##Circular heatmap
 library(ggtreeExtra)
 library(ggtree)
-library(phyloseq)
 library(dplyr)
 library(ggnewscale)
 library(tibble)
@@ -85,7 +84,7 @@ colnames(e)[4] <- "Creatinine"
 colnames(e)[2] <- "UACR"
 colnames(e)[3] <- "eGFR"
 as.data.frame(e)
-e$taxa <- gsub("GUT_", "",x=e$taxa) 
+e$taxa <- gsub("GUT_Species:", "",x=e$taxa) 
 e <- e%>% replace(is.na(.), 0) %>% arrange(taxa) %>% column_to_rownames(var = "taxa")
 e
 #e<- e %>% relocate(UACR, .after=Creatinine)
@@ -99,7 +98,7 @@ col_fun1 = colorRamp2(c(-2, 0, 2), c("orange", "white", "darkslategrey"))
 circos.par(gap.after = c(10))
 
 circos.heatmap(e, col = col_fun1, rownames.side = "outside"
-               , cluster = TRUE, rownames.cex = 0.5) #track.height = 0.2)
+               , cluster = TRUE, rownames.cex = 0.65) #track.height = 0.2)
 
 #add legend
 lgd = Legend(title = "β", col_fun = col_fun1)
@@ -111,15 +110,16 @@ draw(lgd, x = circle_size, just = "left")
 
 
 #adding the group names
-circos.track(track.index = get.current.track.index(), panel.fun = function(x, y) {
-  if(CELL_META$sector.numeric.index == 1) { # the last sector
-    cn = colnames(e)
-    n = length(cn)
-    circos.text(rep(CELL_META$cell.xlim[1], n) + convert_x(1, "mm"), 
-                1:n - 0.5, cn, 
-                cex = 0.5, adj = c(0, 0.5), facing = "clockwise")
-  }
-}, bg.border = NA)
+#circos.track(track.index = get.current.track.index(), panel.fun = function(x, y) {
+ # if(CELL_META$sector.numeric.index == 1) { # the last sector
+  #  cn = colnames(e)
+   # n = length(cn)
+    #circos.text(rep(CELL_META$cell.xlim[1], n) + convert_x(1, "mm"), 
+     #           1:n - 0.5, cn, 
+      #          cex = 0.5, adj = c(0, 0.5), facing = "clockwise")
+#  }
+#}, bg.border = NA)
+
 
 
   
